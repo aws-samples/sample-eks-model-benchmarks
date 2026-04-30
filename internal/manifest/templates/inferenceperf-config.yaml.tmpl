@@ -1,0 +1,38 @@
+server:
+  type: vllm
+  model_name: {{ if .ModelName }}{{ .ModelName }}{{ else }}{{ .ModelHfID }}{{ end }}
+  base_url: http://{{ .TargetHost }}:{{ .TargetPort }}
+  ignore_eos: true
+
+tokenizer:
+  pretrained_model_name_or_path: {{ .ModelHfID }}
+
+api:
+  type: {{ .APIType }}
+  streaming: {{ .Streaming }}
+
+data:
+  type: {{ .DatasetType }}
+  input_distribution:
+    mean: {{ .InputMean }}
+    std_dev: {{ .InputStdDev }}
+    min: {{ .InputMin }}
+    max: {{ .InputMax }}
+  output_distribution:
+    mean: {{ .OutputMean }}
+    std_dev: {{ .OutputStdDev }}
+    min: {{ .OutputMin }}
+    max: {{ .OutputMax }}
+
+load:
+  type: {{ .LoadType }}
+  stages:
+{{- range .Stages }}
+    - rate: {{ .Rate }}
+      duration: {{ .Duration }}
+{{- end }}
+  num_workers: {{ .NumWorkers }}
+
+storage:
+  local_storage:
+    path: /tmp/results

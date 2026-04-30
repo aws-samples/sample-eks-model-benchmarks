@@ -1,0 +1,181 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Name }}
+    app.kubernetes.io/component: model-server
+    accelbench/role: model
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Name }}
+        app.kubernetes.io/component: model-server
+        accelbench/role: model
+    spec:
+      terminationGracePeriodSeconds: 30
+{{- if .ModelServiceAccount }}
+      serviceAccountName: {{ .ModelServiceAccount }}
+{{- end }}
+      tolerations:
+{{- if eq .AcceleratorType "gpu" }}
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+{{- else }}
+        - key: aws.amazon.com/neuron
+          operator: Exists
+          effect: NoSchedule
+{{- end }}
+      nodeSelector:
+        node.kubernetes.io/instance-type: {{ .InstanceTypeName }}
+      containers:
+        - name: vllm
+{{- if eq .AcceleratorType "gpu" }}
+          image: {{ if .PullThroughRegistry }}{{ .PullThroughRegistry }}/dockerhub/{{ end }}vllm/vllm-openai:{{ .FrameworkVersion }}
+{{- else }}
+          image: public.ecr.aws/neuron/pytorch-inference-vllm-neuronx:0.13.0-neuronx-py312-sdk2.28.0-ubuntu24.04
+{{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: HF_TOKEN
+              value: "{{ .HfToken }}"
+{{- if and (eq .AcceleratorType "gpu") (gt .TensorParallelDegree 1) }}
+            - name: NCCL_DEBUG
+              value: "INFO"
+            - name: NCCL_P2P_LEVEL
+              value: "NVL"
+{{- end }}
+{{- if eq .AcceleratorType "gpu" }}
+          args:
+{{- if .ModelS3URI }}
+            - "--model"
+            - "{{ .ModelS3URI }}"
+            - "--load-format"
+            - "runai_streamer"
+            - "--model-loader-extra-config"
+            - '{"concurrency":{{ if gt .StreamerConcurrency 0 }}{{ .StreamerConcurrency }}{{ else }}16{{ end }}}'
+{{- else }}
+            - "--model"
+            - "{{ .ModelHfID }}"
+{{- end }}
+            - "--port"
+            - "8000"
+            - "--tensor-parallel-size"
+            - "{{ .TensorParallelDegree }}"
+            - "--trust-remote-code"
+{{- if not .UseRunaiStreamer }}
+{{- if eq .Quantization "fp16" }}
+            - "--dtype"
+            - "float16"
+{{- else if eq .Quantization "int8" }}
+            - "--quantization"
+            - "bitsandbytes"
+            - "--load-format"
+            - "bitsandbytes"
+{{- else if eq .Quantization "int4" }}
+            - "--quantization"
+            - "bitsandbytes"
+            - "--load-format"
+            - "bitsandbytes"
+{{- end }}
+{{- end }}
+{{- if gt .MaxModelLen 0 }}
+            - "--max-model-len"
+            - "{{ .MaxModelLen }}"
+{{- end }}
+{{- else }}
+          command: ["vllm"]
+          args:
+            - "serve"
+            - "{{ .ModelHfID }}"
+            - "--port"
+            - "8000"
+            - "--tensor-parallel-size"
+            - "{{ .TensorParallelDegree }}"
+            - "--trust-remote-code"
+            - "--block-size"
+            - "32"
+{{- if gt .MaxModelLen 0 }}
+            - "--max-model-len"
+            - "{{ .MaxModelLen }}"
+{{- end }}
+{{- end }}
+          resources:
+            requests:
+              cpu: {{ .CPURequest }}
+              memory: {{ .MemoryRequest }}
+{{- if eq .AcceleratorType "gpu" }}
+              nvidia.com/gpu: "{{ .AcceleratorCount }}"
+            limits:
+              nvidia.com/gpu: "{{ .AcceleratorCount }}"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+{{- else }}
+              {{- /* Neuron: accelerator_count is NeuronCores, but K8s resource is devices (cores/2) */}}
+              aws.amazon.com/neuron: "{{ div .AcceleratorCount 2 }}"
+            limits:
+              aws.amazon.com/neuron: "{{ div .AcceleratorCount 2 }}"
+{{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+{{- if eq .AcceleratorType "gpu" }}
+            failureThreshold: 120
+{{- else }}
+            {{- /* Neuron compilation can take 30-60+ minutes; allow up to 90 minutes */}}
+            failureThreshold: 540
+{{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+{{- if eq .AcceleratorType "gpu" }}
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Name }}
+    app.kubernetes.io/component: model-server
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: {{ .Name }}

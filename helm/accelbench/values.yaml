@@ -1,0 +1,166 @@
+# -- Global settings
+namespace: accelbench
+
+# -- Container images
+# Set image.*.repository to your ECR registry URLs during helm install, e.g.:
+#   --set image.api.repository=<account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-api
+image:
+  api:
+    repository: ""  # Required: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-api
+    tag: "latest"
+    pullPolicy: Always
+  web:
+    repository: ""  # Required: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-web
+    tag: "latest"
+    pullPolicy: Always
+  tools:
+    repository: ""  # Required: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-tools
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  loadgen:
+    repository: ""  # Required: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-loadgen
+    tag: "latest"
+  migration:
+    repository: ""  # Required: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-migration
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  cacheJob:
+    repository: ""  # Optional: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-cache-job
+    tag: "latest"
+
+imagePullSecrets: []
+
+# -- API server
+api:
+  replicaCount: 2
+  port: 8080
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  # -- Service account for API (IRSA)
+  serviceAccount:
+    create: true
+    name: accelbench-api
+    annotations: {}
+    # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/accelbench-api
+
+# -- RBAC: the API server needs permissions to manage benchmark workloads
+rbac:
+  create: true
+
+# -- Web frontend (nginx)
+web:
+  replicaCount: 2
+  port: 80
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  nodeSelector: {}
+  tolerations: []
+
+# -- Public HTTPS ingress (PRD-43a). Disabled by default — port-forward works
+# out of the box. Set enabled=true, host, and tls.source to stand up a public
+# URL via the AWS Load Balancer Controller. See terraform/README.md for the
+# three supported modes and the end-to-end install flow.
+ingress:
+  enabled: false
+  host: ""
+  tls:
+    # One of: acm-route53, acm-existing, none.
+    #   acm-route53:  Terraform creates + validates an ACM cert; populate
+    #                 certificateArn from `terraform output -raw certificate_arn`.
+    #   acm-existing: You already have an ACM cert ARN to use.
+    #   none:         HTTP only — dev/CI clusters. Not for production.
+    source: "none"
+    certificateArn: ""
+
+# -- Database (Aurora PostgreSQL)
+database:
+  # -- Connection string. Typically constructed from Terraform outputs.
+  # Format: postgres://user:password@host:port/dbname?sslmode=require
+  url: ""
+  # -- Alternatively reference an existing Kubernetes secret
+  existingSecret: ""
+  existingSecretKey: "DATABASE_URL"
+  # -- Aurora cluster endpoint from Terraform output
+  host: ""
+  port: 5432
+  name: accelbench
+  username: accelbench
+  sslmode: require
+
+# -- Database migration job
+migration:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# -- Pricing refresh CronJob
+pricingRefresh:
+  enabled: true
+  schedule: "0 3 * * *"  # Daily at 03:00 UTC
+  regions: "us-east-1,us-east-2,us-west-1,us-west-2,eu-west-1,eu-west-2,eu-central-1,ap-southeast-1,ap-northeast-1"
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# -- Catalog seed (on-demand via API, no schedule)
+catalogSeed:
+  enabled: true
+
+# -- HuggingFace token (optional, for gated model access)
+# PRD-31: Prefer setting this via the Configuration page (/configuration) once
+# the API is running. The page stores the token in AWS Secrets Manager at
+# accelbench/config/hf-token and auto-injects it into benchmark runs, cache
+# jobs, and catalog seeds. The values below are kept as a bootstrap path for
+# clusters that want to pre-configure before first boot.
+huggingface:
+  token: ""
+  existingSecret: ""
+  existingSecretKey: "HF_TOKEN"
+
+# -- Benchmark results storage (S3)
+results:
+  # -- S3 bucket name for storing loadgen results (avoids log truncation)
+  # Set from Terraform output: accelbench-results-<account-id>
+  s3Bucket: ""
+
+# -- Model weights storage (S3)
+models:
+  # -- S3 bucket name for cached/custom model weights (Run:ai Streamer)
+  # Set from Terraform output: accelbench-models-<account-id>
+  s3Bucket: ""
+
+# -- Cognito auth (PRD-43). Populate userPoolId + clientId from
+# Terraform outputs. Set authDisabled=true to bypass auth entirely
+# (local dev / CI only — never in production).
+cognito:
+  userPoolId: ""
+  clientId: ""
+  authDisabled: false
+
+# -- Container registry (ECR pull-through cache for Docker Hub)
+# When enabled, vLLM image pulls route through <account>.dkr.ecr.<region>.amazonaws.com/dockerhub/vllm/vllm-openai
+# instead of docker.io/vllm/vllm-openai. Requires Terraform resources from PRD-29.
+registry:
+  pullThroughEnabled: false
+  pullThroughURI: ""  # e.g. 820537372947.dkr.ecr.us-east-2.amazonaws.com

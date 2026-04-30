@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "accelbench.fullname" . }}-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "accelbench.labels" . | nindent 4 }}
+    {{- include "accelbench.api.selectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "accelbench.api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "accelbench.api.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "accelbench.api.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: api
+          image: "{{ .Values.image.api.repository }}:{{ .Values.image.api.tag }}"
+          imagePullPolicy: {{ .Values.image.api.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.api.port | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "accelbench.dbSecretName" . }}
+                  key: {{ .Values.database.existingSecretKey | default "DATABASE_URL" }}
+            {{- if .Values.image.loadgen }}
+            - name: LOADGEN_IMAGE
+              value: "{{ .Values.image.loadgen.repository }}:{{ .Values.image.loadgen.tag | default "latest" }}"
+            {{- end }}
+            - name: TOOLS_IMAGE
+              value: "{{ .Values.image.tools.repository }}:{{ .Values.image.tools.tag }}"
+            {{- if or .Values.huggingface.token .Values.huggingface.existingSecret }}
+            - name: HF_SECRET_NAME
+              value: "{{ include "accelbench.hfSecretName" . }}"
+            {{- end }}
+            {{- if .Values.results.s3Bucket }}
+            - name: RESULTS_S3_BUCKET
+              value: "{{ .Values.results.s3Bucket }}"
+            {{- end }}
+            {{- if .Values.models.s3Bucket }}
+            - name: MODELS_S3_BUCKET
+              value: "{{ .Values.models.s3Bucket }}"
+            {{- end }}
+            {{- if .Values.image.cacheJob.repository }}
+            - name: CACHE_JOB_IMAGE
+              value: "{{ .Values.image.cacheJob.repository }}:{{ .Values.image.cacheJob.tag }}"
+            {{- end }}
+            {{- if and .Values.registry .Values.registry.pullThroughEnabled .Values.registry.pullThroughURI }}
+            - name: PULL_THROUGH_REGISTRY
+              value: "{{ .Values.registry.pullThroughURI }}"
+            {{- end }}
+            # PRD-43: Cognito auth. Populate from Terraform outputs.
+            - name: COGNITO_USER_POOL_ID
+              value: "{{ .Values.cognito.userPoolId }}"
+            - name: COGNITO_CLIENT_ID
+              value: "{{ .Values.cognito.clientId }}"
+            - name: AUTH_DISABLED
+              value: "{{ if .Values.cognito.authDisabled }}1{{ end }}"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
