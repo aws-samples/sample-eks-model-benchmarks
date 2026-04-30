@@ -298,7 +298,7 @@ export default function Runs() {
 
   return (
     <>
-      <PageHeader path={["accelbench", "runs"]} />
+      <PageHeader path={["eksbench", "runs"]} />
 
       <div className="p-6 max-w-[1600px] mx-auto animate-enter">
         <div className="mb-6 flex items-center gap-3">

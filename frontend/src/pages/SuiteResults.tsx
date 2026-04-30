@@ -97,7 +97,7 @@ export default function SuiteResults() {
     <>
       <div className="h-14 border-b border-line flex items-center justify-between px-6 bg-surface-0 sticky top-0 z-20">
         <div className="flex items-center gap-2 font-mono text-[12px] tracking-mech">
-          <span className="text-ink-1">accelbench</span>
+          <span className="text-ink-1">eksbench</span>
           <span className="text-ink-2">/</span>
           <a href="/runs" className="text-ink-1 hover:text-ink-0">runs</a>
           <span className="text-ink-2">/</span>

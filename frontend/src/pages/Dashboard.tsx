@@ -251,7 +251,7 @@ export default function Dashboard() {
 
   return (
     <>
-      <PageHeader path={["accelbench", "dashboard"]} />
+      <PageHeader path={["eksbench", "dashboard"]} />
 
       {flash === "admins-only" && (
         <div className="bg-warn/10 border-b border-warn/40 px-6 py-3 flex items-center justify-between font-mono text-[12px] tracking-mech">
@@ -534,7 +534,7 @@ export default function Dashboard() {
 
         {/* Footer */}
         <div className="mt-16 pt-6 border-t border-line caption flex justify-between">
-          <span>ACCELBENCH · INDUSTRIAL TELEMETRY</span>
+          <span>EKSBENCH · INDUSTRIAL TELEMETRY</span>
           <span>FETCH {loading ? "…" : "OK"} · {new Date().toISOString().slice(0, 19)}Z</span>
         </div>
       </div>

@@ -168,7 +168,7 @@ export default function Layout() {
             </div>
             {!collapsed && (
               <span className="font-mono text-[13px] tracking-widemech text-ink-0 group-hover:text-signal transition-colors">
-                ACCELBENCH
+                EKSBENCH
               </span>
             )}
           </Link>

@@ -111,7 +111,7 @@ export default function Users() {
 
   return (
     <>
-      <PageHeader path={["accelbench", "users"]} />
+      <PageHeader path={["eksbench", "users"]} />
 
       <div className="p-6 max-w-[1400px] mx-auto animate-enter">
         <div className="mb-6 flex items-center gap-3">

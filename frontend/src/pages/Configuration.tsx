@@ -1192,7 +1192,7 @@ export default function Configuration() {
 
   return (
     <>
-      <PageHeader path={["accelbench", "configuration"]} />
+      <PageHeader path={["eksbench", "configuration"]} />
       <div className="p-6 max-w-[1000px] mx-auto animate-enter">
         <div className="mb-8">
           <div className="eyebrow mb-2">PLATFORM CONFIGURATION</div>

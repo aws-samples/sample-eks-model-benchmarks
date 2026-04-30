@@ -91,7 +91,7 @@ export default function Login() {
             <div className="w-12 h-12 rounded-full bg-signal animate-hal-iris shadow-[0_0_30px_rgba(57,255,136,0.8)]" />
           </div>
           <span className="font-mono text-[14px] tracking-widemech text-ink-0 drop-shadow-[0_0_8px_rgba(0,0,0,0.8)]">
-            ACCELBENCH
+            EKSBENCH
           </span>
         </div>
 

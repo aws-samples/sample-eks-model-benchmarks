@@ -331,7 +331,7 @@ export default function Models() {
 
   return (
     <>
-      <PageHeader path={["accelbench", "models"]} />
+      <PageHeader path={["eksbench", "models"]} />
 
       <div className="p-6 max-w-[1600px] mx-auto animate-enter">
         {/* Intro / info + action buttons aligned with the intro paragraph */}
