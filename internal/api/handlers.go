@@ -217,7 +217,6 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	p.HandleFunc("GET /api/v1/estimate", s.handleEstimate)
 	p.Handle("POST /api/v1/catalog/seed", admin(http.HandlerFunc(s.handleCatalogSeed)))
 	p.HandleFunc("GET /api/v1/catalog/seed", s.handleCatalogSeedStatus)
-	p.Handle("POST /api/v1/admin/backfill-model-families", admin(http.HandlerFunc(s.handleBackfillModelFamilies)))
 	// PRD-15: Memory breakdown and OOM history
 	p.HandleFunc("GET /api/v1/memory-breakdown", s.handleMemoryBreakdown)
 	p.HandleFunc("GET /api/v1/oom-history", s.handleOOMHistory)
@@ -292,7 +291,7 @@ func (s *Server) handleListCatalog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := database.CatalogFilter{
 		ModelHfID:       q.Get("model"),
-		ModelFamily:     q.Get("model_family"),
+		ModelType:       q.Get("model_type"),
 		InstanceFamily:  q.Get("instance_family"),
 		AcceleratorType: q.Get("accelerator_type"),
 		SortBy:          q.Get("sort"),
@@ -435,6 +434,16 @@ func (s *Server) CreateRun(ctx context.Context, req *database.RunRequest) (strin
 		u := req.ModelS3URI
 		s3URIPtr = &u
 	}
+	var mnbtPtr *int
+	if req.MaxNumBatchedTokens > 0 {
+		n := req.MaxNumBatchedTokens
+		mnbtPtr = &n
+	}
+	var kvDtypePtr *string
+	if req.KVCacheDtype != "" {
+		v := req.KVCacheDtype
+		kvDtypePtr = &v
+	}
 	run := &database.BenchmarkRun{
 		ModelID:              model.ID,
 		InstanceTypeID:       instType.ID,
@@ -449,6 +458,8 @@ func (s *Server) CreateRun(ctx context.Context, req *database.RunRequest) (strin
 		RunType:              runType,
 		ScenarioID:           scenarioPtr,
 		MaxModelLen:          req.MaxModelLen,
+		MaxNumBatchedTokens:  mnbtPtr,
+		KVCacheDtype:         kvDtypePtr,
 		ModelS3URI:           s3URIPtr,
 		Status:               "pending",
 	}
@@ -809,6 +820,18 @@ func (s *Server) handleRecommend(w http.ResponseWriter, r *http.Request) {
 		opts.UseS3Streamer = true
 	}
 
+	// PRD-47 PR #5: pass observed per-family host-memory ratios into
+	// the recommender so the host-memory check uses empirical data
+	// when available. Unseen families keep the conservative default.
+	// Non-fatal on query failure.
+	if calib, err := s.repo.GetHostMemCalibration(r.Context()); err == nil {
+		opts.HostMemCalibration = calib
+	} else {
+		log.Printf("recommend: host mem calibration query failed: %v", err)
+	}
+	// opts.ModelType is set below, after FetchModelConfig, so we use
+	// HF's canonical architecture name instead of a substring heuristic.
+
 	// Look up instance type from DB.
 	instType, err := s.repo.GetInstanceTypeByName(r.Context(), instanceName)
 	if err != nil {
@@ -830,6 +853,32 @@ func (s *Server) handleRecommend(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusBadGateway, "failed to fetch model metadata from HuggingFace")
 		return
+	}
+
+	// PRD-47 PR #5 depends on parameter_count AND model_type being
+	// populated on the models row so the calibration query can derive
+	// a weight-size denominator and a per-architecture group key. This
+	// is our only reliable hook for it — the create-run path doesn't
+	// have the config. Ensure the model exists and write both fields
+	// if they're missing.
+	if modelCfg != nil {
+		if m, err := s.repo.EnsureModel(r.Context(), modelID, "main"); err == nil && m != nil {
+			if modelCfg.ParameterCount > 0 {
+				if err := s.repo.SetModelParameterCount(r.Context(), m.ID, modelCfg.ParameterCount); err != nil {
+					log.Printf("recommend: set parameter_count: %v", err)
+				}
+			}
+			if modelCfg.ModelType != "" {
+				if err := s.repo.SetModelType(r.Context(), m.ID, modelCfg.ModelType); err != nil {
+					log.Printf("recommend: set model_type: %v", err)
+				}
+			}
+		}
+	}
+	// Calibration key = HF model_type. Drives which bucket the
+	// recommender's host-memory check uses when it runs below.
+	if modelCfg != nil {
+		opts.ModelType = modelCfg.ModelType
 	}
 
 	// Get all GPU instances for suggesting alternatives.
@@ -990,29 +1039,6 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
-func (s *Server) handleBackfillModelFamilies(w http.ResponseWriter, r *http.Request) {
-	// Check if repo supports backfill (real repo does, mock may not)
-	type backfiller interface {
-		BackfillModelFamilies(ctx context.Context) (int64, error)
-	}
-	bf, ok := s.repo.(backfiller)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "backfill not supported")
-		return
-	}
-
-	updated, err := bf.BackfillModelFamilies(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"updated": updated,
-		"message": fmt.Sprintf("Updated model_family for %d models", updated),
-	})
-}
-
 // handleListScenarios returns all available benchmark scenarios.
 func (s *Server) handleListScenarios(w http.ResponseWriter, r *http.Request) {
 	const cacheKey = "scenarios"
@@ -1164,6 +1190,18 @@ func (s *Server) handleCreateSuiteRun(w http.ResponseWriter, r *http.Request) {
 
 	// Create suite run record. PRD-41: persist framework/framework_version/model_s3_uri
 	// so the manifest export can reconstruct the deployment exactly.
+	// PRD-46: also persist max_num_batched_tokens so the suite manifest
+	// reproduces runtime vLLM flags byte-for-byte.
+	var suiteMnbtPtr *int
+	if req.MaxNumBatchedTokens > 0 {
+		n := req.MaxNumBatchedTokens
+		suiteMnbtPtr = &n
+	}
+	var suiteKVDtypePtr *string
+	if req.KVCacheDtype != "" {
+		v := req.KVCacheDtype
+		suiteKVDtypePtr = &v
+	}
 	suiteRun := &database.TestSuiteRun{
 		ModelID:              model.ID,
 		InstanceTypeID:       instType.ID,
@@ -1171,6 +1209,8 @@ func (s *Server) handleCreateSuiteRun(w http.ResponseWriter, r *http.Request) {
 		TensorParallelDegree: req.TensorParallelDegree,
 		Quantization:         req.Quantization,
 		MaxModelLen:          req.MaxModelLen,
+		MaxNumBatchedTokens:  suiteMnbtPtr,
+		KVCacheDtype:         suiteKVDtypePtr,
 		Status:               "pending",
 	}
 	if req.Framework != "" {
@@ -1240,6 +1280,10 @@ type suiteRunResponse struct {
 	AcceleratorName      string                    `json:"accelerator_name,omitempty"`
 	AcceleratorCount     int                       `json:"accelerator_count,omitempty"`
 	AcceleratorMemoryGiB int                       `json:"accelerator_memory_gib,omitempty"`
+	// PRD-46: computed --max-num-seqs value used when the model was
+	// deployed. Not persisted separately (derived from the busiest
+	// scenario's NumWorkers), so we compute it on read for display.
+	MaxNumSeqs           int                       `json:"max_num_seqs,omitempty"`
 	Progress             suiteProgressInfo         `json:"progress"`
 	Results              []database.ScenarioResult `json:"results"`
 	ScenarioDefinitions  []suiteScenarioDefinition `json:"scenario_definitions"`
@@ -1284,8 +1328,20 @@ func (s *Server) handleGetSuiteRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	scenarioDefs := make([]suiteScenarioDefinition, 0, len(results))
+	maxNumSeqs := 0
 	for _, r := range results {
 		if sc := scenario.Get(r.ScenarioID); sc != nil {
+			if ov, _ := s.repo.GetScenarioOverride(ctx, r.ScenarioID); ov != nil {
+				sc = sc.Merge(&scenario.Override{
+					NumWorkers: ov.NumWorkers,
+					Streaming:  ov.Streaming,
+					InputMean:  ov.InputMean,
+					OutputMean: ov.OutputMean,
+				})
+			}
+			if sc.NumWorkers > maxNumSeqs {
+				maxNumSeqs = sc.NumWorkers
+			}
 			scenarioDefs = append(scenarioDefs, suiteScenarioDefinition{
 				ID:              sc.ID,
 				Name:            sc.Name,
@@ -1298,6 +1354,7 @@ func (s *Server) handleGetSuiteRun(w http.ResponseWriter, r *http.Request) {
 
 	resp := suiteRunResponse{
 		TestSuiteRun: suiteRun,
+		MaxNumSeqs:   maxNumSeqs,
 		Progress: suiteProgressInfo{
 			Completed: completed,
 			Total:     len(results),

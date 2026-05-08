@@ -71,6 +71,12 @@ type Recommendation struct {
 	OutputSequenceLength int     `json:"output_sequence_length"`
 	OverheadGiB          float64 `json:"overhead_gib"` // Runtime overhead used (for display/tuning)
 
+	// PRD-46: vLLM scheduler knobs. Zero / empty means "let vLLM pick
+	// its default." Populated for GPU runs; Neuron recommender leaves
+	// them at zero-value since Neuron vLLM doesn't accept these flags.
+	MaxNumBatchedTokens int    `json:"max_num_batched_tokens,omitempty"`
+	KVCacheDtype        string `json:"kv_cache_dtype,omitempty"`
+
 	Explanation  Explanation  `json:"explanation"`
 	ModelInfo    ModelInfo    `json:"model_info"`
 	InstanceInfo InstanceInfo `json:"instance_info"`
@@ -229,37 +235,82 @@ func isTransformersVersionUnsupported(version, vllmVersion string) (bool, string
 	return false, ""
 }
 
-// Host-memory checking constants. Calibrated from empirical cgroup
-// memory.peak observations during vLLM weight loading:
+// Host-memory checking constants. Defaults; overridden per-family by
+// observed p95 when available (PRD-47 PR #5).
 //
-//   Qwen3-8B (15.25 GiB weights) / g6.xlarge / streamer  → 13+ GiB, OOM'd
-//   Phi-4   (30.2  GiB weights) / g6e.2xlarge / HF      → 31.1 GiB peak
+// hfLoaderHostMultiplier — the HuggingFace loader materializes full
+// BF16 weights in CPU RAM before copying to GPU. Empirical: Phi-4
+// (30.2 GiB weights) hit 31.1 GiB peak on g6e.2xlarge → ~1.03×.
+// Keep 1.08 as a safe bound; tuned across Llama / Mistral / Phi
+// observations.
 //
-// The Phi-4 measurement pins the HF-loader peak at ~1.03× the on-disk
-// weight size — much lower than the 1.3× we originally guessed. The
-// streamer path with concurrency=16 on shard-heavy models sits closer
-// to 0.9×. With a 2 GiB baseline buffer on top (kubelet reservation,
-// DaemonSets, SOCI snapshotter cache, eviction headroom), the effective
-// multipliers below give a small but safe margin over observed peaks
-// without rejecting legitimate (model, instance) pairs.
+// s3StreamerHostMultiplier — the Run:ai streamer streams `concurrency`
+// shards at a time directly to GPU, so peak is bounded by
+// concurrency × avg_shard_size. For a typical 5-30 shard model, that
+// lands well under half the weight size. 0.5 is a conservative upper
+// bound for the common case; the single observed worst case
+// (Qwen3-8B with 399 safetensors shards at concurrency=16) really did
+// push toward 0.95×, but applying that constant to every model
+// incorrectly rejected Llama / Mistral / Qwen2.5 on 16 GiB-host L40S
+// instances. Per-family calibration (PR #5) catches the Qwen3 outlier
+// once the history column fills in.
 //
-// A proper fix is to record observed peak memory per run and consult
-// that history instead of multiplying weight size by a constant; until
-// that lands, tune these numbers when a new data point disagrees.
+// hostMemAllocatableFrac — kubelet+system reservations on EKS AL2023
+// are ~750 MiB kubelet + ~250 MiB system ≈ 1 GiB fixed. On a 16 GiB
+// host that's ~94% allocatable; on 64 GiB it's ~98%. A flat 85%
+// under-approximated allocatable on larger hosts. Tiered:
+//   MemoryGiB >= 64 → 0.92
+//   MemoryGiB <  64 → 0.85 (keep safety margin where overhead bites most)
 const (
 	hfLoaderHostMultiplier   = 1.08
-	s3StreamerHostMultiplier = 0.95
+	// s3StreamerHostMultiplier: empirical median across 8 completed TP=1 runs
+	// on the S3 streamer path is ~1.15 (range 0.99–1.19). The streamer's
+	// default RUNAI_STREAMER_MEMORY_LIMIT=-1 allocates a buffer equal to the
+	// full safetensor file, so real peak is ≈ weights + small fixed overhead,
+	// not the "concurrency × shard_size" 0.5× we initially guessed. See
+	// PRD-47 and run-ai/runai-model-streamer docs for background.
+	s3StreamerHostMultiplier = 1.15
 	hostMemBufferBytes       = 2 * gibBytes
-	hostMemAllocatableFrac   = 0.85
+	hostMemAllocatableFracSmall = 0.85 // hosts < 64 GiB
+	hostMemAllocatableFracLarge = 0.92 // hosts ≥ 64 GiB
+	hostMemAllocatableLargeThresholdGiB = 64
 )
+
+// hostAllocatableFrac returns the allocatable fraction of host memory
+// for a given total-host-memory size. Larger hosts see more of their
+// RAM as usable because kubelet overhead is roughly fixed-absolute.
+func hostAllocatableFrac(memoryGiB int) float64 {
+	if memoryGiB >= hostMemAllocatableLargeThresholdGiB {
+		return hostMemAllocatableFracLarge
+	}
+	return hostMemAllocatableFracSmall
+}
 
 // peakHostMemBytes estimates peak host RAM during model load. The
 // multiplier reflects whether vLLM's HuggingFace loader (CPU-resident
 // weights) or Run:ai streamer (streaming layers) is used.
-func peakHostMemBytes(modelWeightBytes float64, useS3Streamer bool) float64 {
+//
+// PRD-47: when modelType is non-empty AND the calibration map has a
+// matching entry, use the observed p95 ratio instead of the hand-tuned
+// default. Unseen types keep the conservative default.
+func peakHostMemBytes(
+	modelWeightBytes float64,
+	useS3Streamer bool,
+	modelType string,
+	calibration map[string]float64,
+) float64 {
 	mult := hfLoaderHostMultiplier
 	if useS3Streamer {
 		mult = s3StreamerHostMultiplier
+	}
+	if modelType != "" && len(calibration) > 0 {
+		loader := "hf"
+		if useS3Streamer {
+			loader = "s3"
+		}
+		if observed, ok := calibration[modelType+"|"+loader]; ok && observed > 0 {
+			mult = observed
+		}
 	}
 	return modelWeightBytes*mult + hostMemBufferBytes
 }
@@ -280,14 +331,16 @@ func checkHostMemory(
 	inst InstanceSpec,
 	allInstances []InstanceSpec,
 	useS3Streamer bool,
+	modelType string,
+	calibration map[string]float64,
 ) (bool, string, string) {
 	// inst.MemoryGiB == 0 means the instance catalog doesn't carry host-mem
 	// info. Skip the check rather than reject conservatively.
 	if inst.MemoryGiB == 0 {
 		return true, "", ""
 	}
-	peak := peakHostMemBytes(modelWeightBytes, useS3Streamer)
-	allocatable := float64(inst.MemoryGiB) * gibBytes * hostMemAllocatableFrac
+	peak := peakHostMemBytes(modelWeightBytes, useS3Streamer, modelType, calibration)
+	allocatable := float64(inst.MemoryGiB) * gibBytes * hostAllocatableFrac(inst.MemoryGiB)
 	if peak <= allocatable {
 		return true, "", ""
 	}
@@ -322,7 +375,7 @@ func checkHostMemory(
 		if alt.MemoryGiB <= inst.MemoryGiB {
 			continue
 		}
-		altAllocatable := float64(alt.MemoryGiB) * gibBytes * hostMemAllocatableFrac
+		altAllocatable := float64(alt.MemoryGiB) * gibBytes * hostAllocatableFrac(alt.MemoryGiB)
 		if peak <= altAllocatable {
 			suggested = alt.Name
 			break
@@ -356,16 +409,42 @@ func supportsFP8(acceleratorName string) bool {
 	return false
 }
 
+// SupportsFP8KVCache returns true if the accelerator has native FP8
+// compute (Hopper / Ada Lovelace) and therefore can halve KV-cache
+// memory with --kv-cache-dtype=fp8 at negligible quality cost. Exported
+// so handlers can default the flag without re-running the full
+// recommender.
+func SupportsFP8KVCache(acceleratorName string) bool {
+	return supportsFP8(acceleratorName)
+}
+
 // modelMemoryBytes returns the model weight memory in bytes for a given quantization.
 func modelMemoryBytes(params int64, quant string) float64 {
 	return float64(params) * bytesPerParam(quant)
 }
 
-// kvCachePerTokenBytes returns KV cache memory per token in bytes.
-// Formula: 2 (K+V) × num_layers × num_kv_heads × head_dim × 2 (FP16 bytes)
-func kvCachePerTokenBytes(cfg ModelConfig) float64 {
+// KVCachePerTokenBytes returns KV cache memory per token in bytes.
+// Formula: 2 (K+V) × num_layers × num_kv_heads × head_dim × bytes_per_element
+//
+// bytes_per_element is derived from kvCacheDtype: fp16/bf16 = 2, fp8 = 1.
+// PRD-46 wires --kv-cache-dtype=fp8 as the default on H100/H200/L40S, so the
+// recommender must size KV budget to match. An empty string means
+// "auto / matches compute dtype", which we treat as fp16.
+//
+// Exported so the memory-breakdown handler shares one source of truth with
+// the recommender's feasibility math.
+func KVCachePerTokenBytes(cfg ModelConfig, kvCacheDtype string) float64 {
+	return kvCachePerTokenBytes(cfg, kvCacheDtype)
+}
+
+func kvCachePerTokenBytes(cfg ModelConfig, kvCacheDtype string) float64 {
+	bytesPerElement := 2.0 // fp16 / bf16 / auto
+	switch kvCacheDtype {
+	case "fp8", "fp8_e4m3", "fp8_e5m2":
+		bytesPerElement = 1.0
+	}
 	headDim := float64(cfg.HiddenSize) / float64(cfg.NumAttentionHeads)
-	return 2 * float64(cfg.NumHiddenLayers) * float64(cfg.NumKeyValueHeads) * headDim * 2
+	return 2 * float64(cfg.NumHiddenLayers) * float64(cfg.NumKeyValueHeads) * headDim * bytesPerElement
 }
 
 // effectiveKVCacheLength returns the effective context length for KV cache sizing.
@@ -478,6 +557,10 @@ type RecommendOptions struct {
 	TPOverride          int     // Force specific tensor parallel degree (0 = auto)
 	OverheadGiB         float64 // Override calculated overhead (0 = auto-calculate)
 	MaxModelLenOverride int     // Force specific max_model_len (0 = auto); concurrency adjusts to fit
+	// PRD-46: force a specific --max-num-batched-tokens (0 = auto-derive
+	// from ISL). Useful for prefill-budget sweeps; bypasses the
+	// max(2048, ISL) floor.
+	MaxNumBatchedTokensOverride int
 	// VLLMVersion is the currently-configured vLLM image tag. Used only in
 	// the transformers-compatibility error message so it reflects what's
 	// actually running instead of a hardcoded "vLLM 0.19.0" string. Empty
@@ -492,6 +575,21 @@ type RecommendOptions struct {
 	// The host-memory feasibility check consults this to decide whether a
 	// given instance can fit the model weight load in container RAM.
 	UseS3Streamer bool
+
+	// ModelType is HuggingFace's canonical architecture name from
+	// config.json ("llama", "qwen2", "qwen3", "phi3", "mistral",
+	// "gpt_oss", …). Used as the per-family calibration key. Empty
+	// string disables calibration for this call; the recommender falls
+	// back to the hand-tuned default multipliers.
+	ModelType string
+
+	// HostMemCalibration maps `"{model_type}|{loader}"` to the observed
+	// p95 of host_memory_peak / weight_size for completed runs in that
+	// bucket. Loader is "hf" or "s3". When a matching key is present and
+	// the ratio is positive, the recommender uses that instead of the
+	// hard-coded defaults for the host-memory feasibility check.
+	// Unseen buckets keep the defaults. PRD-47.
+	HostMemCalibration map[string]float64
 }
 
 // DefaultOverheadGiB calculates the default runtime overhead for a model based on its dimensions.
@@ -593,7 +691,7 @@ func Recommend(cfg ModelConfig, inst InstanceSpec, allInstances []InstanceSpec, 
 	if cfg.PreQuantized && cfg.ActualMemoryBytes > 0 {
 		hostCheckBytes = modelMemEffective
 	}
-	if ok, reason, suggested := checkHostMemory(hostCheckBytes, inst, allInstances, opts.UseS3Streamer); !ok {
+	if ok, reason, suggested := checkHostMemory(hostCheckBytes, inst, allInstances, opts.UseS3Streamer, opts.ModelType, opts.HostMemCalibration); !ok {
 		rec := &Recommendation{
 			ModelInfo: ModelInfo{
 				ParameterCount:        cfg.ParameterCount,
@@ -788,6 +886,15 @@ func Recommend(cfg ModelConfig, inst InstanceSpec, allInstances []InstanceSpec, 
 
 	rec.Explanation.Feasible = true
 
+	// PRD-46: decide --kv-cache-dtype up front so KV budget math below
+	// matches the dtype vLLM will actually use. On FP8-capable GPUs
+	// (H100/H200/L40S) we default to fp8, which halves KV per token and
+	// roughly doubles max_model_len / concurrency compared to fp16.
+	kvCacheDtype := ""
+	if supportsFP8(inst.AcceleratorName) {
+		kvCacheDtype = "fp8"
+	}
+
 	// Calculate max model length.
 	// Beyond raw weights, vLLM consumes GPU memory for:
 	//   1. CUDA context + runtime: ~0.5 GiB (fixed)
@@ -795,7 +902,7 @@ func Recommend(cfg ModelConfig, inst InstanceSpec, allInstances []InstanceSpec, 
 	//      batch sizes (sum ≈ 3400 tokens). Each graph allocates per-layer
 	//      activation buffers proportional to hidden_size and FFN width.
 	//      FFN intermediate_size ≈ 3.5 × hidden_size for gated architectures.
-	kvPerToken := kvCachePerTokenBytes(cfg)
+	kvPerToken := kvCachePerTokenBytes(cfg, kvCacheDtype)
 	effectiveModelMem := modelMemoryBytes(cfg.ParameterCount, chosenQuant)
 	// Use user-provided overhead if specified, otherwise calculate from model dimensions
 	var runtimeOverhead float64
@@ -847,13 +954,25 @@ func Recommend(cfg ModelConfig, inst InstanceSpec, allInstances []InstanceSpec, 
 		rec.OutputSequenceLength = maxModelLen / 3
 	}
 
-	// Calculate concurrency: KV budget / (tokens per sequence × bytes per token).
-	avgSeqLen := float64(rec.InputSequenceLength + rec.OutputSequenceLength)
-	effectiveSeqLen := float64(effectiveKVCacheLength(int(avgSeqLen), cfg.SlidingWindow))
+	// PRD-47: concurrency is sized against maxModelLen consistently.
+	// vLLM pre-provisions a KV slot big enough to fit a full-length
+	// request per in-flight sequence (paged attention reclaims idle
+	// pages, but worst-case inputs still push toward the full slot).
+	// Using avgSeqLen here and maxModelLen in the joint constraint
+	// below chained two different cost models together and produced
+	// outputs that were hard to reason about. One model, one scalar:
+	// plan the budget for the largest request vLLM might accept.
+	//
+	// Cost: on models where the user keeps a long max_model_len for
+	// headroom but actually runs short requests, the recommended
+	// concurrency is 2-3× lower than the workload needs. Remedy:
+	// lower max_model_len (explained in Explanation.Concurrency below).
+	effectiveSeqLen := float64(effectiveKVCacheLength(maxModelLen, cfg.SlidingWindow))
 	memPerSeq := kvPerToken * effectiveSeqLen
+	kvBudgetBytes := 0.9 * remainingBytes // 10% headroom for paged-attention churn
 	maxConcurrent := 1
 	if memPerSeq > 0 {
-		maxConcurrent = int(remainingBytes / memPerSeq)
+		maxConcurrent = int(kvBudgetBytes / memPerSeq)
 	}
 	if maxConcurrent > 64 {
 		maxConcurrent = 64
@@ -862,33 +981,31 @@ func Recommend(cfg ModelConfig, inst InstanceSpec, allInstances []InstanceSpec, 
 		maxConcurrent = 1
 	}
 
-	// Joint constraint: ensure max_model_len × concurrency fits within 90%
-	// of the KV cache budget. vLLM uses paged attention so not every slot is
-	// fully allocated, but we need headroom to prevent OOM under load.
-	kvBudgetTokens := int(0.9 * remainingBytes / kvPerToken)
-	benchMaxModelLen := maxModelLen // save before adjustment for production note
-	if maxModelLen*maxConcurrent > kvBudgetTokens {
-		if userOverrideMaxModelLen {
-			// User chose max_model_len; adjust concurrency to fit.
-			maxConcurrent = kvBudgetTokens / maxModelLen
-			if maxConcurrent < 1 {
-				maxConcurrent = 1
-			}
-		} else {
-			// Auto mode: prefer keeping concurrency high, reduce max_model_len.
-			safeMaxModelLen := roundDownContext(kvBudgetTokens / maxConcurrent)
-			minModelLen := roundDownContext((rec.InputSequenceLength + rec.OutputSequenceLength) * 2)
-			if safeMaxModelLen >= minModelLen {
-				maxModelLen = safeMaxModelLen
-			} else {
+	// Auto mode: if maxConcurrent ended up at 1 because maxModelLen is
+	// huge, try trimming maxModelLen down to recover parallelism.
+	// User-overridden maxModelLen is sacred — we respect their choice.
+	benchMaxModelLen := maxModelLen // save for production note
+	if !userOverrideMaxModelLen && maxConcurrent == 1 && memPerSeq > 0 {
+		minModelLen := roundDownContext((rec.InputSequenceLength + rec.OutputSequenceLength) * 2)
+		for maxConcurrent < 4 && maxModelLen > minModelLen {
+			maxModelLen = roundDownContext(maxModelLen / 2)
+			if maxModelLen < minModelLen {
 				maxModelLen = minModelLen
-				maxConcurrent = kvBudgetTokens / maxModelLen
-				if maxConcurrent < 1 {
-					maxConcurrent = 1
-				}
 			}
-			benchMaxModelLen = maxModelLen
+			effectiveSeqLen = float64(effectiveKVCacheLength(maxModelLen, cfg.SlidingWindow))
+			memPerSeq = kvPerToken * effectiveSeqLen
+			if memPerSeq > 0 {
+				maxConcurrent = int(kvBudgetBytes / memPerSeq)
+			}
+			if maxConcurrent > 64 {
+				maxConcurrent = 64
+				break
+			}
+			if maxModelLen == minModelLen {
+				break
+			}
 		}
+		benchMaxModelLen = maxModelLen
 	}
 
 	rec.MaxModelLen = maxModelLen
@@ -896,6 +1013,7 @@ func Recommend(cfg ModelConfig, inst InstanceSpec, allInstances []InstanceSpec, 
 
 	// Production note: when the benchmark config uses less than the model's
 	// full context, show what concurrency would look like at full context.
+	kvBudgetTokens := int(kvBudgetBytes / kvPerToken)
 	if !userOverrideMaxModelLen && benchMaxModelLen < nativeMaxModelLen && kvBudgetTokens > 0 {
 		fullContextConcurrency := kvBudgetTokens / nativeMaxModelLen
 		if fullContextConcurrency < 1 {
@@ -915,14 +1033,40 @@ func Recommend(cfg ModelConfig, inst InstanceSpec, allInstances []InstanceSpec, 
 			remainingBytes/gibBytes, rec.TensorParallelDegree, perDeviceGiB, maxModelLen, maxConcurrent)
 	}
 
-	// Generate explanation for concurrency
-	if cfg.SlidingWindow > 0 && cfg.SlidingWindow < int(avgSeqLen) {
-		rec.Explanation.Concurrency = fmt.Sprintf("Based on %.1f GiB KV cache memory. Sliding window (%d tokens) caps KV per sequence, enabling higher concurrency.",
-			remainingBytes/gibBytes, cfg.SlidingWindow)
+	// Generate explanation for concurrency. PRD-47 sizes concurrency
+	// against max_model_len (not avg request length) so vLLM can still
+	// fit worst-case inputs per slot. Lowering max_model_len trades
+	// context for parallelism.
+	if cfg.SlidingWindow > 0 && cfg.SlidingWindow < maxModelLen {
+		rec.Explanation.Concurrency = fmt.Sprintf("Based on %.1f GiB KV cache memory (90%% budgeted). Sliding window (%d tokens) caps KV per sequence, enabling higher concurrency than max_model_len=%d alone would allow.",
+			remainingBytes/gibBytes, cfg.SlidingWindow, maxModelLen)
 	} else {
-		rec.Explanation.Concurrency = fmt.Sprintf("Based on %.1f GiB KV cache memory with %d-token average sequence length.",
-			remainingBytes/gibBytes, int(avgSeqLen))
+		rec.Explanation.Concurrency = fmt.Sprintf("Based on %.1f GiB KV cache memory (90%% budgeted), sized for max_model_len=%d tokens per slot. Lower max_model_len for higher concurrency.",
+			remainingBytes/gibBytes, maxModelLen)
 	}
+
+	// PRD-46: --max-num-batched-tokens sizes vLLM's per-iteration
+	// prefill budget. Default to max(2048, ISL) capped at max_model_len
+	// so a single input fits in one iteration on long-ISL runs, while
+	// preserving vLLM's 2048 default on short-ISL runs. Override wins
+	// when set.
+	mnbt := 2048
+	if rec.InputSequenceLength > mnbt {
+		mnbt = rec.InputSequenceLength
+	}
+	if rec.MaxModelLen > 0 && mnbt > rec.MaxModelLen {
+		mnbt = rec.MaxModelLen
+	}
+	if opts.MaxNumBatchedTokensOverride > 0 {
+		mnbt = opts.MaxNumBatchedTokensOverride
+	}
+	rec.MaxNumBatchedTokens = mnbt
+
+	// PRD-46 / PRD-47: KV cache dtype decided up front (see kvCacheDtype
+	// above) so the KV budget math uses the right bytes/element; emit
+	// it here. FP8 on H100/H200/L40S halves KV memory with negligible
+	// quality impact under throughput benchmarks.
+	rec.KVCacheDtype = kvCacheDtype
 
 	return rec
 }

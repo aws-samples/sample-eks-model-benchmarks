@@ -13,6 +13,11 @@ type Repo interface {
 	GetModelByHfID(ctx context.Context, hfID, hfRevision string) (*Model, error)
 	GetModelByID(ctx context.Context, id string) (*Model, error)
 	EnsureModel(ctx context.Context, hfID, hfRevision string) (*Model, error)
+	// PRD-47 PR #5: record parameter_count at recommend time so the
+	// per-family calibration query has a weight-size denominator.
+	SetModelParameterCount(ctx context.Context, modelID string, params int64) error
+	// PRD-47 follow-up: HF model_type as the calibration family key.
+	SetModelType(ctx context.Context, modelID, modelType string) error
 	GetInstanceTypeByName(ctx context.Context, name string) (*InstanceType, error)
 	GetInstanceTypeByID(ctx context.Context, id string) (*InstanceType, error)
 	CreateBenchmarkRun(ctx context.Context, run *BenchmarkRun) (string, error)
@@ -21,6 +26,11 @@ type Repo interface {
 	UpdateLoadgenConfig(ctx context.Context, runID, config string) error
 	SetLoadgenStartedAt(ctx context.Context, runID string) error
 	GetLoadgenStartedAt(ctx context.Context, runID string) (*time.Time, error)
+	// PRD-47: peak container workingSetBytes during the load phase.
+	SetRunHostMemoryPeak(ctx context.Context, runID string, gib float64) error
+	SetSuiteRunHostMemoryPeak(ctx context.Context, suiteRunID string, gib float64) error
+	// PRD-47 PR #5: p95 of observed (host_peak / weights) by model_family × loader.
+	GetHostMemCalibration(ctx context.Context) (map[string]float64, error)
 	PersistMetrics(ctx context.Context, runID string, m *BenchmarkMetrics) error
 	GetBenchmarkRun(ctx context.Context, runID string) (*BenchmarkRun, error)
 	GetMetricsByRunID(ctx context.Context, runID string) (*BenchmarkMetrics, error)

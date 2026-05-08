@@ -10,6 +10,8 @@ import (
 
 	"github.com/accelbench/accelbench/internal/database"
 	"github.com/accelbench/accelbench/internal/report"
+	"github.com/accelbench/accelbench/internal/scenario"
+	"github.com/accelbench/accelbench/internal/testsuite"
 )
 
 // handleExportManifest generates a Kubernetes manifest YAML for deploying
@@ -77,6 +79,9 @@ type manifestData struct {
 	TensorParallelDegree int
 	Quantization         string
 	MaxModelLen          int
+	MaxNumBatchedTokens  int    // 0 = use vLLM default
+	MaxNumSeqs           int    // 0 = use vLLM default
+	KVCacheDtype         string // empty = use vLLM default
 	AcceleratorType      string
 	AcceleratorCount     int
 	CPURequest           string
@@ -93,12 +98,19 @@ func generateManifest(d *database.RunExportDetails) (string, error) {
 		FrameworkVersion:     d.FrameworkVersion,
 		TensorParallelDegree: d.TensorParallelDegree,
 		MaxModelLen:          d.MaxModelLen,
+		MaxNumSeqs:           d.Concurrency,
 		AcceleratorType:      d.AcceleratorType,
 		AcceleratorCount:     d.AcceleratorCount,
 		CPURequest:           fmt.Sprintf("%d", max(d.VCPUs/2, 4)),
 		MemoryRequest:        fmt.Sprintf("%dGi", max(d.MemoryGiB/2, 16)),
 		ShmSize:              "16Gi",
 		PullThroughRegistry:  os.Getenv("PULL_THROUGH_REGISTRY"),
+	}
+	if d.MaxNumBatchedTokens != nil {
+		data.MaxNumBatchedTokens = *d.MaxNumBatchedTokens
+	}
+	if d.KVCacheDtype != nil {
+		data.KVCacheDtype = *d.KVCacheDtype
 	}
 	if d.ModelS3URI != nil && *d.ModelS3URI != "" {
 		data.ModelS3URI = *d.ModelS3URI
@@ -131,6 +143,15 @@ var manifestTemplate = template.Must(template.New("manifest").Funcs(manifestFunc
 # Instance: {{ .InstanceType }}
 # Tensor Parallel: {{ .TensorParallelDegree }}
 # Max Model Length: {{ .MaxModelLen }}
+{{- if gt .MaxNumBatchedTokens 0 }}
+# Max Num Batched Tokens: {{ .MaxNumBatchedTokens }}
+{{- end }}
+{{- if gt .MaxNumSeqs 0 }}
+# Max Num Seqs: {{ .MaxNumSeqs }}
+{{- end }}
+{{- if .KVCacheDtype }}
+# KV Cache Dtype: {{ .KVCacheDtype }}
+{{- end }}
 {{- if .Quantization }}
 # Quantization: {{ .Quantization }}
 {{- end }}
@@ -261,6 +282,18 @@ spec:
             - "--max-model-len"
             - "{{ .MaxModelLen }}"
 {{- end }}
+{{- if gt .MaxNumBatchedTokens 0 }}
+            - "--max-num-batched-tokens"
+            - "{{ .MaxNumBatchedTokens }}"
+{{- end }}
+{{- if gt .MaxNumSeqs 0 }}
+            - "--max-num-seqs"
+            - "{{ .MaxNumSeqs }}"
+{{- end }}
+{{- if .KVCacheDtype }}
+            - "--kv-cache-dtype"
+            - "{{ .KVCacheDtype }}"
+{{- end }}
 {{- else }}
           command: ["vllm"]
           args:
@@ -276,6 +309,14 @@ spec:
 {{- if gt .MaxModelLen 0 }}
             - "--max-model-len"
             - "{{ .MaxModelLen }}"
+{{- end }}
+{{- if gt .MaxNumBatchedTokens 0 }}
+            - "--max-num-batched-tokens"
+            - "{{ .MaxNumBatchedTokens }}"
+{{- end }}
+{{- if gt .MaxNumSeqs 0 }}
+            - "--max-num-seqs"
+            - "{{ .MaxNumSeqs }}"
 {{- end }}
 {{- end }}
           resources:
@@ -490,6 +531,33 @@ func (s *Server) handleExportSuiteManifest(w http.ResponseWriter, r *http.Reques
 		MemoryGiB:            instance.MemoryGiB,
 	}
 	details.MaxModelLen = suite.MaxModelLen
+	details.MaxNumBatchedTokens = suite.MaxNumBatchedTokens
+	details.KVCacheDtype = suite.KVCacheDtype
+	// PRD-46: --max-num-seqs was sized at deploy time to the busiest
+	// scenario in the suite; reproduce that value in the export by
+	// walking the suite's scenarios and taking the max NumWorkers,
+	// applying any DB-stored scenario overrides (PRD-32).
+	if ts := testsuite.Get(suite.SuiteID); ts != nil {
+		maxSeqs := 0
+		for _, sid := range ts.Scenarios {
+			sc := scenario.Get(sid)
+			if sc == nil {
+				continue
+			}
+			if ov, _ := s.repo.GetScenarioOverride(r.Context(), sid); ov != nil {
+				sc = sc.Merge(&scenario.Override{
+					NumWorkers: ov.NumWorkers,
+					Streaming:  ov.Streaming,
+					InputMean:  ov.InputMean,
+					OutputMean: ov.OutputMean,
+				})
+			}
+			if sc.NumWorkers > maxSeqs {
+				maxSeqs = sc.NumWorkers
+			}
+		}
+		details.Concurrency = maxSeqs
+	}
 	// Framework fields: use persisted values when available (suites
 	// created after migration 026), else derive from accelerator type
 	// as a safe fallback for historical rows.

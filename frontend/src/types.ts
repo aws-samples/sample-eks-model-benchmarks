@@ -1,7 +1,7 @@
 export interface CatalogEntry {
   run_id: string;
   model_hf_id: string;
-  model_family?: string;
+  model_type?: string;
   parameter_count?: number;
   instance_type_name: string;
   instance_family: string;
@@ -54,6 +54,14 @@ export interface BenchmarkRun {
   output_sequence_length: number;
   dataset_name: string;
   run_type: string;
+  // vLLM deployment configuration. These already flow on the JSON from
+  // the run detail endpoint; surfaced on the TS type so the Configuration
+  // panel can render every knob used at deploy time.
+  max_model_len?: number;
+  max_num_batched_tokens?: number | null;
+  kv_cache_dtype?: string | null;
+  scenario_id?: string | null;
+  model_s3_uri?: string | null;
   status: string;
   error_message?: string;
   superseded: boolean;
@@ -140,9 +148,13 @@ export interface RunRequest {
   run_type?: string;
   scenario_id?: string;
   max_model_len?: number;
+  max_num_batched_tokens?: number;
+  kv_cache_dtype?: string;
   api_type?: string;
   model_s3_uri?: string;
   hf_token?: string;
+  // PRD-47 PR #6: skip the host-memory feasibility check when set.
+  allow_host_mem_override?: boolean;
 }
 
 export interface RunListItem {
@@ -245,6 +257,8 @@ export interface RecommendResponse {
   tensor_parallel_degree: number;
   quantization?: string | null;
   max_model_len: number;
+  max_num_batched_tokens?: number;
+  kv_cache_dtype?: string;
   concurrency: number;
   input_sequence_length: number;
   output_sequence_length: number;
@@ -282,7 +296,7 @@ export interface CatalogSeedStatus {
 export interface CatalogFilter {
   ids?: string[]; // PRD-36: used by Compare to fetch selected rows only
   model?: string;
-  model_family?: string;
+  model_type?: string;
   instance_family?: string;
   accelerator_type?: string;
   sort?: string;
@@ -316,6 +330,8 @@ export interface EstimateConfig {
   concurrency: number;
   input_sequence_length: number;
   output_sequence_length: number;
+  max_num_batched_tokens?: number;
+  kv_cache_dtype?: string;
 }
 
 export interface MemoryEstimate {
@@ -444,8 +460,12 @@ export interface SuiteRunRequest {
   tensor_parallel_degree?: number;
   quantization?: string;
   max_model_len?: number;
+  max_num_batched_tokens?: number;
+  kv_cache_dtype?: string;
   model_s3_uri?: string;
   hf_token?: string;
+  // PRD-47 PR #6: skip the host-memory feasibility check when set.
+  allow_host_mem_override?: boolean;
 }
 
 export interface ScenarioProgress {
@@ -528,6 +548,19 @@ export interface TestSuiteRun {
   accelerator_name?: string;
   accelerator_count?: number;
   accelerator_memory_gib?: number;
+  // vLLM deployment configuration. These are set at suite creation time
+  // and shared across every scenario in the suite (one model deployment
+  // serving all scenarios). Surfaced in the Configuration panel on the
+  // Suite result page so users see the knobs used to launch the model.
+  tensor_parallel_degree?: number;
+  quantization?: string | null;
+  max_model_len?: number;
+  max_num_batched_tokens?: number | null;
+  max_num_seqs?: number;
+  kv_cache_dtype?: string | null;
+  framework?: string | null;
+  framework_version?: string | null;
+  model_s3_uri?: string | null;
   // PRD-35: cost frozen at suite completion (hourly × own started→completed
   // window; all scenarios share one EC2 node).
   total_cost_usd?: number | null;

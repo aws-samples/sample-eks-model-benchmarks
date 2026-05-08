@@ -8,7 +8,12 @@ type Model struct {
 	ID             string    `json:"id"`
 	HfID           string    `json:"hf_id"`
 	HfRevision     string    `json:"hf_revision"`
-	ModelFamily    *string   `json:"model_family,omitempty"`
+	// ModelType is HuggingFace's canonical architecture name from
+	// config.json (e.g. "llama", "qwen2", "qwen3", "phi3", "mistral",
+	// "gpt_oss"). Used as the family key for PRD-47 per-family host-
+	// memory calibration. Nullable for rows where the config was never
+	// fetched.
+	ModelType      *string   `json:"model_type,omitempty"`
 	ParameterCount *int64    `json:"parameter_count,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -39,6 +44,11 @@ type BenchmarkRun struct {
 	DatasetName           string     `json:"dataset_name"`
 	RunType               string     `json:"run_type"`
 	MaxModelLen           int        `json:"max_model_len,omitempty"`
+	// PRD-46: vLLM scheduler knobs persisted so a run can be reproduced
+	// byte-for-byte from the DB. Null on historical rows; the exporter
+	// and UI treat null as "flag omitted, vLLM picked its default."
+	MaxNumBatchedTokens   *int       `json:"max_num_batched_tokens,omitempty"`
+	KVCacheDtype          *string    `json:"kv_cache_dtype,omitempty"`
 	ScenarioID            *string    `json:"scenario_id,omitempty"`    // scenario identifier (chatbot, batch, etc.)
 	LoadgenConfig         *string    `json:"loadgen_config,omitempty"` // inference-perf YAML config
 	ModelS3URI            *string    `json:"model_s3_uri,omitempty"`   // s3://bucket/path — set when weights loaded via Run:ai streamer
@@ -60,6 +70,10 @@ type BenchmarkRun struct {
 	// owning pod's goroutine.
 	OwnerPod        *string `json:"owner_pod,omitempty"`
 	CancelRequested bool    `json:"cancel_requested"`
+	// PRD-47: peak container workingSetBytes observed during the load
+	// phase, in GiB. Powers per-family host-memory calibration. Null on
+	// historical rows and on runs where the kubelet scrape failed.
+	HostMemoryPeakGiB *float64 `json:"host_memory_peak_gib,omitempty"`
 }
 
 type BenchmarkMetrics struct {
@@ -143,10 +157,22 @@ type RunRequest struct {
 	DatasetName          string  `json:"dataset_name"`
 	RunType              string  `json:"run_type"`
 	MaxModelLen          int     `json:"max_model_len,omitempty"`
+	// PRD-46: vLLM scheduler knobs. Recommender populates these; direct
+	// API submitters may set them to override. Zero / empty means "use
+	// the recommender's choice if available, else vLLM's default."
+	MaxNumBatchedTokens  int     `json:"max_num_batched_tokens,omitempty"`
+	KVCacheDtype         string  `json:"kv_cache_dtype,omitempty"`
 	ScenarioID           string  `json:"scenario_id,omitempty"` // scenario identifier (chatbot, batch, etc.)
 	APIType              string  `json:"api_type,omitempty"`    // "chat_completion" (default) or "completion"
 	ModelS3URI           string  `json:"model_s3_uri,omitempty"` // s3://bucket/path — load from S3 via Run:ai streamer
 	HfToken              string  `json:"hf_token,omitempty"`
+	// PRD-47 PR #6: when true, the host-memory feasibility check is
+	// downgraded to a warning for this run. Useful when the operator
+	// has verified empirically that a rejected model fits on the host
+	// (or there's just no history yet to calibrate against). Does not
+	// override GPU-memory, TP, or pipeline-tag checks — those are
+	// architectural, not statistical.
+	AllowHostMemOverride bool `json:"allow_host_mem_override,omitempty"`
 }
 
 // TestSuiteRun represents a test suite execution.
@@ -158,6 +184,9 @@ type TestSuiteRun struct {
 	TensorParallelDegree int        `json:"tensor_parallel_degree"`
 	Quantization         *string    `json:"quantization,omitempty"`
 	MaxModelLen          int        `json:"max_model_len,omitempty"`
+	// PRD-46: vLLM scheduler knobs (see BenchmarkRun).
+	MaxNumBatchedTokens *int    `json:"max_num_batched_tokens,omitempty"`
+	KVCacheDtype        *string `json:"kv_cache_dtype,omitempty"`
 	Status               string     `json:"status"`
 	CurrentScenario      *string    `json:"current_scenario,omitempty"`
 	StartedAt            *time.Time `json:"started_at,omitempty"`
@@ -174,6 +203,10 @@ type TestSuiteRun struct {
 	// PRD-40: replica coordination (see BenchmarkRun).
 	OwnerPod        *string `json:"owner_pod,omitempty"`
 	CancelRequested bool    `json:"cancel_requested"`
+	// PRD-47: peak container workingSetBytes observed during the shared
+	// model-load phase, in GiB. Suite-level because one model deployment
+	// is reused across all scenarios.
+	HostMemoryPeakGiB *float64 `json:"host_memory_peak_gib,omitempty"`
 }
 
 // ScenarioResult represents the result of a single scenario within a suite run.
@@ -233,8 +266,13 @@ type SuiteRunRequest struct {
 	TensorParallelDegree int      `json:"tensor_parallel_degree"`
 	Quantization         *string  `json:"quantization,omitempty"`
 	MaxModelLen          int      `json:"max_model_len,omitempty"`
+	// PRD-46: vLLM scheduler knobs (see RunRequest).
+	MaxNumBatchedTokens  int      `json:"max_num_batched_tokens,omitempty"`
+	KVCacheDtype         string   `json:"kv_cache_dtype,omitempty"`
 	ModelS3URI           string   `json:"model_s3_uri,omitempty"` // s3://bucket/path — load from S3 via Run:ai streamer
 	HfToken              string   `json:"hf_token,omitempty"`
+	// PRD-47 PR #6: see RunRequest.
+	AllowHostMemOverride bool `json:"allow_host_mem_override,omitempty"`
 }
 
 // ModelCache tracks models cached from HuggingFace to S3, or custom S3 models.

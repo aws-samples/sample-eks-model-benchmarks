@@ -27,6 +27,9 @@ type MockRepo struct {
 	toolVersions    *ToolVersions                // PRD-34
 	heartbeats      map[string]time.Time         // PRD-40: pod_name → last_seen_at
 	nextID          int
+	// PRD-47 PR #5: canned calibration map for GetHostMemCalibration.
+	// Exported so tests can seed values. Keys are "{model_family}|{loader}".
+	HostMemCalibration map[string]float64
 }
 
 // NewMockRepo creates a new MockRepo.
@@ -117,6 +120,42 @@ func (m *MockRepo) EnsureModel(_ context.Context, hfID, hfRevision string) (*Mod
 	return model, nil
 }
 
+func (m *MockRepo) SetModelParameterCount(_ context.Context, modelID string, params int64) error {
+	if params <= 0 {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, mdl := range m.models {
+		if mdl.ID == modelID {
+			if mdl.ParameterCount == nil {
+				v := params
+				mdl.ParameterCount = &v
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("model %s not found", modelID)
+}
+
+func (m *MockRepo) SetModelType(_ context.Context, modelID, modelType string) error {
+	if modelType == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, mdl := range m.models {
+		if mdl.ID == modelID {
+			if mdl.ModelType == nil {
+				v := modelType
+				mdl.ModelType = &v
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("model %s not found", modelID)
+}
+
 func (m *MockRepo) GetInstanceTypeByName(_ context.Context, name string) (*InstanceType, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -198,6 +237,44 @@ func (m *MockRepo) SetLoadgenStartedAt(_ context.Context, runID string) error {
 	now := time.Now()
 	run.LoadgenStartedAt = &now
 	return nil
+}
+
+// PRD-47: peak load-phase host memory in GiB.
+func (m *MockRepo) SetRunHostMemoryPeak(_ context.Context, runID string, gib float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run, ok := m.runs[runID]
+	if !ok {
+		return fmt.Errorf("run %s not found", runID)
+	}
+	v := gib
+	run.HostMemoryPeakGiB = &v
+	return nil
+}
+
+// PRD-47: peak load-phase host memory for a suite run (shared deployment).
+func (m *MockRepo) SetSuiteRunHostMemoryPeak(_ context.Context, suiteRunID string, gib float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	run, ok := m.suiteRuns[suiteRunID]
+	if !ok {
+		return fmt.Errorf("suite run %s not found", suiteRunID)
+	}
+	v := gib
+	run.HostMemoryPeakGiB = &v
+	return nil
+}
+
+// PRD-47 PR #5: mock returns the preset HostMemCalibration map (empty
+// by default, so the recommender falls back to defaults).
+func (m *MockRepo) GetHostMemCalibration(_ context.Context) (map[string]float64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]float64, len(m.HostMemCalibration))
+	for k, v := range m.HostMemCalibration {
+		out[k] = v
+	}
+	return out, nil
 }
 
 func (m *MockRepo) GetLoadgenStartedAt(_ context.Context, runID string) (*time.Time, error) {
@@ -487,6 +564,8 @@ func (m *MockRepo) GetRunExportDetails(_ context.Context, runID string) (*RunExp
 		TensorParallelDegree: run.TensorParallelDegree,
 		Quantization:         run.Quantization,
 		MaxModelLen:          run.MaxModelLen,
+		MaxNumBatchedTokens:  run.MaxNumBatchedTokens,
+		KVCacheDtype:         run.KVCacheDtype,
 		AcceleratorType:      inst.AcceleratorType,
 		AcceleratorCount:     inst.AcceleratorCount,
 		AcceleratorMemoryGiB: inst.AcceleratorMemoryGiB,
@@ -777,7 +856,7 @@ func (m *MockRepo) ListCatalog(_ context.Context, f CatalogFilter) ([]CatalogEnt
 		) {
 			continue
 		}
-		if f.ModelFamily != "" && (model.ModelFamily == nil || *model.ModelFamily != f.ModelFamily) {
+		if f.ModelType != "" && (model.ModelType == nil || *model.ModelType != f.ModelType) {
 			continue
 		}
 		if f.InstanceFamily != "" && inst.Family != f.InstanceFamily {
@@ -790,7 +869,7 @@ func (m *MockRepo) ListCatalog(_ context.Context, f CatalogFilter) ([]CatalogEnt
 		entries = append(entries, CatalogEntry{
 			RunID:                     runID,
 			ModelHfID:                 model.HfID,
-			ModelFamily:               model.ModelFamily,
+			ModelType:                 model.ModelType,
 			ParameterCount:            model.ParameterCount,
 			InstanceTypeName:          inst.Name,
 			InstanceFamily:            inst.Family,

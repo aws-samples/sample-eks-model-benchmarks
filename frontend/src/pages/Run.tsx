@@ -9,6 +9,7 @@ import ModelCombobox from "../components/ModelCombobox";
 import MemoryBreakdown from "../components/MemoryBreakdown";
 import OOMWarning from "../components/OOMWarning";
 import RecommendationCards from "../components/RecommendationCards";
+import InfoTip from "../components/InfoTip";
 
 type RunMode = "single" | "suite";
 type TokenStatus = "idle" | "validating" | "valid" | "invalid";
@@ -36,6 +37,10 @@ export default function Run() {
 
   const [cachedModel, setCachedModel] = useState<ModelCache | null>(null);
   const [useS3Cache, setUseS3Cache] = useState(true);
+  // PRD-47 PR #6: operator override for the host-memory infeasibility
+  // gate. True only when the recommender rejects on host RAM AND the
+  // user has explicitly checked the "run anyway" box.
+  const [allowHostMemOverride, setAllowHostMemOverride] = useState(false);
 
   // PRD-12/13: Scenarios and test suites
   const [runMode, setRunMode] = useState<RunMode>("single");
@@ -62,6 +67,10 @@ export default function Run() {
       input_sequence_length: Number(searchParams.get("input_seq")) || 512,
       output_sequence_length: Number(searchParams.get("output_seq")) || 256,
       max_model_len: Number(searchParams.get("max_model_len")) || 0,
+      // PRD-46: pre-filled by the recommender when a model+instance is
+      // selected; users can override both from the form.
+      max_num_batched_tokens: Number(searchParams.get("max_num_batched_tokens")) || 0,
+      kv_cache_dtype: searchParams.get("kv_cache_dtype") || "",
       hf_token: searchParams.get("hf_token") || "",
       overhead_gib: 0, // 0 = auto-calculated
       api_type: "",
@@ -112,6 +121,9 @@ export default function Run() {
       setValidTPOptions([]);
       setMemoryBreakdown(null);
       setOOMHistory(null);
+      // PRD-47 PR #6: a fresh recommendation invalidates any prior
+      // override checkbox state — the user is targeting a new pair now.
+      setAllowHostMemOverride(false);
 
       try {
         // Fetch recommendation and OOM history in parallel
@@ -134,6 +146,10 @@ export default function Run() {
             input_sequence_length: rec.input_sequence_length,
             output_sequence_length: rec.output_sequence_length,
             overhead_gib: rec.overhead_gib,
+            // PRD-46: pull the scheduler knobs from the recommender
+            // too so they're populated before the user edits anything.
+            max_num_batched_tokens: rec.max_num_batched_tokens ?? 0,
+            kv_cache_dtype: rec.kv_cache_dtype ?? "",
           }));
         }
       } catch (err) {
@@ -346,18 +362,39 @@ export default function Run() {
     }, 300);
   }
 
+  // PRD-47 PR #6: classify the recommender's rejection (if any). We
+  // split host-memory rejections (overridable) from everything else so
+  // the submit button reflects whether the user still has a path to
+  // "Start Benchmark". Keep this in sync with the hostMemOnly test in
+  // the warning panel below.
+  const infeasibleReason =
+    recommendation?.explanation && !recommendation.explanation.feasible
+      ? recommendation.explanation.reason ?? ""
+      : "";
+  const hostMemOnlyInfeasible =
+    infeasibleReason !== "" &&
+    /host RAM/i.test(infeasibleReason) &&
+    !/VRAM|accelerator memory|divides.*heads|transformers/i.test(infeasibleReason);
+  const archInfeasible = infeasibleReason !== "" && !hostMemOnlyInfeasible;
+
   // Mirror handleSubmit's payload requirements: model + instance are
   // always required; single-mode additionally needs scenario + dataset,
   // suite-mode needs a suite selected. Everything else has defaults or
   // comes from auto-recommend. Disable the submit button until the
   // required fields are populated so admins don't hit a server-side
   // 400 that would land them on an error banner.
+  //
+  // PRD-47 PR #6: also gate on feasibility. Architectural infeasibility
+  // (GPU memory, TP, transformers) is a hard block — no override. Host-
+  // memory infeasibility needs the explicit "Run anyway" checkbox.
   const canSubmit =
     form.model_hf_id.trim() !== "" &&
     form.instance_type_name.trim() !== "" &&
     (runMode === "suite"
       ? selectedSuite !== ""
-      : selectedScenario !== "" && selectedDataset !== "");
+      : selectedScenario !== "" && selectedDataset !== "") &&
+    !archInfeasible &&
+    (!hostMemOnlyInfeasible || allowHostMemOverride);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -376,8 +413,11 @@ export default function Run() {
           tensor_parallel_degree: form.tensor_parallel_degree,
           quantization: form.quantization || undefined,
           max_model_len: form.max_model_len || undefined,
+          max_num_batched_tokens: form.max_num_batched_tokens || undefined,
+          kv_cache_dtype: form.kv_cache_dtype || undefined,
           model_s3_uri: form.model_s3_uri || undefined,
           hf_token: form.hf_token || undefined,
+          allow_host_mem_override: allowHostMemOverride || undefined,
         });
         navigate(`/suite-runs/${res.id}`);
       } else {
@@ -386,10 +426,13 @@ export default function Run() {
           ...form,
           quantization: form.quantization || undefined,
           max_model_len: form.max_model_len || undefined,
+          max_num_batched_tokens: form.max_num_batched_tokens || undefined,
+          kv_cache_dtype: form.kv_cache_dtype || undefined,
           hf_token: form.hf_token || undefined,
           scenario_id: selectedScenario,
           dataset_name: selectedDataset,
           run_type: "on_demand",
+          allow_host_mem_override: allowHostMemOverride || undefined,
         });
         navigate(`/results/${res.id}`);
       }
@@ -743,8 +786,12 @@ export default function Run() {
           </div>
         )}
 
-        {/* Infeasibility warning with alternatives */}
-        {recommendation?.explanation && !recommendation.explanation.feasible && (
+        {/* Infeasibility warning with alternatives. PRD-47 PR #6:
+            host-memory-only rejections can be overridden by the user
+            via the checkbox below; canSubmit above is kept in sync. */}
+        {recommendation?.explanation && !recommendation.explanation.feasible && (() => {
+          const hostMemOnly = hostMemOnlyInfeasible;
+          return (
           <div className="border border-warn/40 bg-warn/5 p-4">
             <div className="flex items-center gap-2 mb-3">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" className="text-warn shrink-0">
@@ -755,6 +802,28 @@ export default function Run() {
             <p className="font-mono text-[12.5px] text-ink-0 mb-4">
               {recommendation.explanation.reason}
             </p>
+            {hostMemOnly && (
+              <div className="mt-4 pt-3 border-t border-warn/30">
+                <label className="flex items-start gap-2 cursor-pointer font-mono text-[12px] text-ink-0">
+                  <input
+                    type="checkbox"
+                    checked={allowHostMemOverride}
+                    onChange={(e) => setAllowHostMemOverride(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Run anyway — I've verified this model fits on the host.
+                    <br />
+                    <span className="caption text-ink-2">
+                      The host-memory check uses a statistical estimate; it can
+                      be wrong for new models. Enabling this flag still records
+                      the run normally, so the peak will feed back into the
+                      recommender for future calls.
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
             {(() => {
               const hasQuant = !!recommendation.alternatives?.quantization_option;
               const hasLarger = !!recommendation.alternatives?.larger_instance;
@@ -803,7 +872,8 @@ export default function Run() {
               );
             })()}
           </div>
-        )}
+          );
+        })()}
 
         {/* PRD-15: Memory Breakdown (always visible when recommendation exists) */}
         {recommendation?.explanation?.feasible && (
@@ -813,8 +883,9 @@ export default function Run() {
         {/* Config */}
         <div className="grid grid-cols-4 gap-4">
           <div>
-            <label className="eyebrow block mb-1.5">
+            <label className="eyebrow flex items-center gap-1.5 mb-1.5">
               Tensor Parallel
+              <InfoTip text="Number of accelerators (GPUs/NeuronCores) the model is sharded across. Higher TP spreads the model over more devices, cutting per-device memory use but adding inter-device communication overhead. vLLM requires TP to divide the number of attention heads evenly." />
             </label>
             {validTPOptions.length > 0 ? (
               <select
@@ -842,8 +913,9 @@ export default function Run() {
             )}
           </div>
           <div>
-            <label className="eyebrow block mb-1.5">
+            <label className="eyebrow flex items-center gap-1.5 mb-1.5">
               Concurrency
+              <InfoTip text="Target number of in-flight requests the loadgen drives against the model. Controls how much parallelism vLLM sees: higher concurrency increases throughput but also queueing latency and KV-cache pressure, and can trigger OOM on memory-bound configs." />
             </label>
             <input
               type="number"
@@ -855,8 +927,9 @@ export default function Run() {
             />
           </div>
           <div>
-            <label className="eyebrow block mb-1.5">
+            <label className="eyebrow flex items-center gap-1.5 mb-1.5">
               Quantization
+              <InfoTip text="Compresses model weights to reduce memory. FP16 is half-precision (no compression vs native bf16, just a dtype cast). INT8/INT4 use bitsandbytes to shrink weights ~2×/4× at some quality cost. Leave as None to use the model's native dtype (typically bf16/fp16)." />
             </label>
             <select
               value={form.quantization}
@@ -870,8 +943,9 @@ export default function Run() {
             </select>
           </div>
           <div>
-            <label className="eyebrow block mb-1.5">
+            <label className="eyebrow flex items-center gap-1.5 mb-1.5">
               Max Model Len
+              <InfoTip text="Maximum total tokens (prompt + generation) vLLM will allocate KV-cache for per request. Higher values support longer contexts but consume more GPU memory per concurrent request. Set to 0 for auto (capped at the model's architectural max). Must satisfy input + output ≤ max_model_len." />
             </label>
             <input
               type="number"
@@ -910,8 +984,9 @@ export default function Run() {
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="eyebrow block mb-1.5">
+            <label className="eyebrow flex items-center gap-1.5 mb-1.5">
               Input Seq Length
+              <InfoTip text="Number of prompt tokens sent per request by the loadgen. Affects prefill cost (compute-bound, ~quadratic in length) and KV-cache footprint. Must fit alongside Output Seq Length within Max Model Len." />
             </label>
             <input
               type="number"
@@ -924,8 +999,9 @@ export default function Run() {
             />
           </div>
           <div>
-            <label className="eyebrow block mb-1.5">
+            <label className="eyebrow flex items-center gap-1.5 mb-1.5">
               Output Seq Length
+              <InfoTip text="Number of tokens the model generates per request. Drives decode time (memory-bandwidth-bound, linear in length) and the bulk of end-to-end latency. Must fit alongside Input Seq Length within Max Model Len." />
             </label>
             <input
               type="number"
@@ -936,6 +1012,43 @@ export default function Run() {
               }
               className="input w-full"
             />
+          </div>
+        </div>
+
+        {/* PRD-46: vLLM scheduler knobs. Pre-filled by the recommender;
+            users can override. Leaving blank falls back to vLLM defaults. */}
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="eyebrow flex items-center gap-1.5 mb-1.5">
+              Max Num Batched Tokens
+              <InfoTip text="vLLM's per-iteration prefill budget. Higher values let a single long prompt finish prefill in one step but cost more memory. The recommender defaults to max(2048, input_sequence_length) capped at max_model_len. Leave blank to use vLLM's default (2048)." />
+            </label>
+            <input
+              type="number"
+              min={0}
+              value={form.max_num_batched_tokens}
+              onChange={(e) =>
+                set("max_num_batched_tokens", Number(e.target.value))
+              }
+              placeholder="0 = vLLM default"
+              className="input w-full"
+            />
+          </div>
+          <div>
+            <label className="eyebrow flex items-center gap-1.5 mb-1.5">
+              KV Cache Dtype
+              <InfoTip text="Storage precision for the KV cache. fp8 halves KV-cache memory on H100/H200/L40S with negligible quality impact. The recommender sets fp8 automatically on FP8-capable GPUs. Blank/auto = match compute dtype (bf16/fp16)." />
+            </label>
+            <select
+              value={form.kv_cache_dtype}
+              onChange={(e) => set("kv_cache_dtype", e.target.value)}
+              className="input w-full"
+            >
+              <option value="">auto (match compute dtype)</option>
+              <option value="fp8">fp8</option>
+              <option value="fp8_e4m3">fp8_e4m3</option>
+              <option value="fp8_e5m2">fp8_e5m2</option>
+            </select>
           </div>
         </div>
 

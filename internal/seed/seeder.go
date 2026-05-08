@@ -38,6 +38,8 @@ type Repo interface {
 	GetActiveCatalogSeed(ctx context.Context) (*database.CatalogSeedStatus, error)
 	// PRD-40: claim ownership on the seed row.
 	ClaimSeed(ctx context.Context, seedID, pod string) error
+	// PRD-47 PR #5: per-family host-memory calibration ratios.
+	GetHostMemCalibration(ctx context.Context) (map[string]float64, error)
 }
 
 // ServerDeps is the subset of the api.Server surface the seeder needs.
@@ -134,6 +136,15 @@ func (s *Seeder) run(id string, opts Options) {
 		return
 	}
 
+	// PRD-47 PR #5: pull observed per-family host-memory ratios so seeded
+	// runs inherit the same calibration the UI recommender uses.
+	// Non-fatal on failure — seeded runs fall through to defaults.
+	hostMemCalibration, err := s.repo.GetHostMemCalibration(ctx)
+	if err != nil {
+		log.Printf("seed %s: host mem calibration query failed: %v", id, err)
+		hostMemCalibration = nil
+	}
+
 	// Snapshot every known instance type once — the recommender's
 	// larger-instance fallback scans this list.
 	allInstTypes, err := s.repo.ListInstanceTypes(ctx)
@@ -212,8 +223,10 @@ func (s *Seeder) run(id string, opts Options) {
 				// streamer (for S3-cached models), so its host-memory check
 				// accounts for the lower host-RAM peak that path provides.
 				rec = recommend.Recommend(*modelCfg, inst, allSpecs, recommend.RecommendOptions{
-					VLLMVersion:   tv.FrameworkVersion,
-					UseS3Streamer: s3URI != "",
+					VLLMVersion:        tv.FrameworkVersion,
+					UseS3Streamer:      s3URI != "",
+					ModelType:          modelCfg.ModelType,
+					HostMemCalibration: hostMemCalibration,
 				})
 			}
 			if rec == nil || !rec.Explanation.Feasible {
@@ -245,6 +258,11 @@ func (s *Seeder) run(id string, opts Options) {
 				InputSequenceLength:  rec.InputSequenceLength,
 				OutputSequenceLength: rec.OutputSequenceLength,
 				MaxModelLen:          rec.MaxModelLen,
+				// PRD-46: pass through the recommender's vLLM scheduler
+				// knobs so seeded catalog runs get the same defaults as
+				// runs submitted from the UI.
+				MaxNumBatchedTokens:  rec.MaxNumBatchedTokens,
+				KVCacheDtype:         rec.KVCacheDtype,
 				DatasetName:          matrix.Defaults.Dataset,
 				RunType:              "catalog",
 				ScenarioID:           matrix.Defaults.Scenario,

@@ -87,6 +87,19 @@ func (o *Orchestrator) ExecuteSuite(ctx context.Context, suiteRunID string, req 
 		return
 	}
 
+	// PRD-46: --max-num-seqs sizes vLLM's concurrent sequence slots. A
+	// suite shares one model deployment across scenarios that may drive
+	// different worker counts, so size the slots for the busiest
+	// scenario to avoid reshaping the deployment mid-suite.
+	maxSeqs := 0
+	for _, sid := range suite.Scenarios {
+		if sc := o.resolveScenario(ctx, sid); sc != nil {
+			if sc.NumWorkers > maxSeqs {
+				maxSeqs = sc.NumWorkers
+			}
+		}
+	}
+
 	cfg := RunConfig{
 		RunID:        suiteRunID,
 		Model:        model,
@@ -100,6 +113,9 @@ func (o *Orchestrator) ExecuteSuite(ctx context.Context, suiteRunID string, req 
 			TensorParallelDegree: req.TensorParallelDegree,
 			Quantization:         req.Quantization,
 			MaxModelLen:          req.MaxModelLen,
+			MaxNumBatchedTokens:  req.MaxNumBatchedTokens,
+			KVCacheDtype:         req.KVCacheDtype,
+			Concurrency:          maxSeqs,
 			ModelS3URI:           req.ModelS3URI,
 			HfToken:              req.HfToken,
 		},
@@ -115,10 +131,25 @@ func (o *Orchestrator) ExecuteSuite(ctx context.Context, suiteRunID string, req 
 	}
 	defer o.teardownSuite(context.Background(), ns, modelName, suiteRunID)
 
+	// PRD-47: scrape peak host memory during the shared load phase.
+	// Suites reuse one model deployment across scenarios, so a single
+	// peak is both sufficient and correct.
+	hostMemScraper := NewHostMemScraper(o.client, ns,
+		fmt.Sprintf("app.kubernetes.io/name=%s", modelName), "vllm")
+	hostMemScraper.Start(ctx)
+
 	// Wait for model readiness
 	log.Printf("[suite %s] waiting for model readiness", suiteRunID[:8])
-	if err := o.waitForReady(ctx, ns, modelName, cfg); err != nil {
-		log.Printf("[suite %s] model not ready: %v", suiteRunID[:8], err)
+	readyErr := o.waitForReady(ctx, ns, modelName, cfg)
+	if peakGiB := hostMemScraper.Stop(); peakGiB > 0 {
+		if err := o.repo.SetSuiteRunHostMemoryPeak(context.Background(), suiteRunID, peakGiB); err != nil {
+			log.Printf("[suite %s] warning: persist host memory peak: %v", suiteRunID[:8], err)
+		} else {
+			log.Printf("[suite %s] load-phase host memory peak: %.2f GiB", suiteRunID[:8], peakGiB)
+		}
+	}
+	if readyErr != nil {
+		log.Printf("[suite %s] model not ready: %v", suiteRunID[:8], readyErr)
 		o.repo.UpdateSuiteRunStatus(ctx, suiteRunID, "failed", nil)
 		o.persistSuiteCost(ctx, suiteRunID)
 		return

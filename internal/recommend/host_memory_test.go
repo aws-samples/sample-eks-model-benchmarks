@@ -77,29 +77,58 @@ func TestHostMemCheck_LargerInstancePasses(t *testing.T) {
 	}
 }
 
-func TestHostMemCheck_S3StreamerStillInfeasibleOnSmallInstance(t *testing.T) {
-	// Empirical: the Run:ai streamer with concurrency=16 on shard-heavy
-	// models (Qwen3-8B has ~399 safetensors shards) keeps nearly as much
-	// host RAM resident as the HF loader path during load. Peak ~15.25
-	// × 0.9 + 3 = 16.7 GiB, which still exceeds g6.xlarge's 13.6 GiB
-	// allocatable. Observed OOMKill at 13 GiB in a live run with
-	// --load-format=runai_streamer, concurrency=16.
+func TestHostMemCheck_S3StreamerInfeasibleOnSmallInstanceByDefault(t *testing.T) {
+	// PRD-47: the default S3-streamer multiplier is 1.15, calibrated to
+	// empirical TP=1 runs (Run:ai streamer with default
+	// RUNAI_STREAMER_MEMORY_LIMIT=-1 allocates a full-file buffer, so
+	// real peak ≈ weights × ~1.15 + overhead). Math for Qwen3-8B on
+	// g6.xlarge: 15.25 × 1.15 + 2 = ~19.5 GiB peak; allocatable = 16 ×
+	// 0.85 = 13.6 GiB → correctly infeasible.
 	rec := Recommend(qwen3_8b, g6xlargeFull, allWithHostMem, RecommendOptions{
 		UseS3Streamer: true,
 	})
 	if rec.Explanation.Feasible {
-		t.Fatal("expected infeasible on g6.xlarge even with S3 streamer")
+		t.Fatalf("expected infeasible on g6.xlarge (host 16 GiB, peak ~19.5 GiB)")
 	}
 }
 
 func TestHostMemCheck_S3StreamerFitsOnMidInstance(t *testing.T) {
-	// Streamer peak ~16.7 GiB fits in g6.2xlarge's 27.2 GiB allocatable.
+	// Streamer peak ~19.5 GiB fits in g6.2xlarge's 27.2 GiB allocatable.
 	rec := Recommend(qwen3_8b, g6_2xlargeFull, allWithHostMem, RecommendOptions{
 		UseS3Streamer: true,
 	})
 	if !rec.Explanation.Feasible {
 		t.Fatalf("expected feasible on g6.2xlarge with streamer, got: %s",
 			rec.Explanation.Reason)
+	}
+}
+
+// PRD-47 PR #5: per-family calibration overrides the default multiplier
+// for families we have observations on.
+func TestHostMemCheck_CalibrationAppliesToMatchingFamily(t *testing.T) {
+	// An empirical ratio of 2.0 for qwen3|s3 should push a pair that
+	// was feasible at the 1.15 default into infeasible territory on a
+	// small host (15.25 × 2.0 + 2 = 32.5 GiB > 27.2 GiB allocatable).
+	rec := Recommend(qwen3_8b, g6_2xlargeFull, allWithHostMem, RecommendOptions{
+		UseS3Streamer: true,
+		ModelType:     "qwen3",
+		HostMemCalibration: map[string]float64{
+			"qwen3|s3": 2.0,
+		},
+	})
+	if rec.Explanation.Feasible {
+		t.Fatal("expected infeasible once observed 2.0x ratio replaces the default 1.15x")
+	}
+	// Non-matching family shouldn't inherit the qwen3 ratio.
+	rec2 := Recommend(qwen3_8b, g6_2xlargeFull, allWithHostMem, RecommendOptions{
+		UseS3Streamer: true,
+		ModelType:     "llama",
+		HostMemCalibration: map[string]float64{
+			"qwen3|s3": 2.0,
+		},
+	})
+	if !rec2.Explanation.Feasible {
+		t.Fatal("llama key shouldn't inherit qwen3 calibration")
 	}
 }
 
@@ -120,24 +149,111 @@ func TestHostMemCheck_SkippedWhenMemoryGiBUnset(t *testing.T) {
 	}
 }
 
+// PRD-47 PR #3: kubelet+system reservations on EKS AL2023 are ~fixed
+// absolute (~1 GiB), not proportional. Large hosts should see more of
+// their total RAM as allocatable.
+func TestHostAllocatableFrac_TieredByHostSize(t *testing.T) {
+	small := hostAllocatableFrac(16)
+	medium := hostAllocatableFrac(32)
+	justBelowThreshold := hostAllocatableFrac(63)
+	atThreshold := hostAllocatableFrac(64)
+	large := hostAllocatableFrac(1024)
+
+	if small != hostMemAllocatableFracSmall {
+		t.Errorf("16 GiB host: got %v, want %v", small, hostMemAllocatableFracSmall)
+	}
+	if medium != hostMemAllocatableFracSmall {
+		t.Errorf("32 GiB host: got %v, want %v", medium, hostMemAllocatableFracSmall)
+	}
+	if justBelowThreshold != hostMemAllocatableFracSmall {
+		t.Errorf("63 GiB host: got %v, want %v (small bucket)", justBelowThreshold, hostMemAllocatableFracSmall)
+	}
+	if atThreshold != hostMemAllocatableFracLarge {
+		t.Errorf("64 GiB host: got %v, want %v (large bucket)", atThreshold, hostMemAllocatableFracLarge)
+	}
+	if large != hostMemAllocatableFracLarge {
+		t.Errorf("1024 GiB host: got %v, want %v", large, hostMemAllocatableFracLarge)
+	}
+}
+
+// PRD-47 PR #5: calibration overrides defaults when a matching key
+// exists, and unseen families keep the defaults.
+func TestPeakHostMemBytes_CalibrationOverridesDefault(t *testing.T) {
+	const weightBytes = 10.0 * gibBytes
+
+	defaultHF := peakHostMemBytes(weightBytes, false, "", nil)
+	defaultS3 := peakHostMemBytes(weightBytes, true, "", nil)
+
+	calib := map[string]float64{
+		"qwen3|s3": 2.8,  // observed worst case for shard-heavy Qwen3 TP=4 runs
+		"llama|hf": 1.02, // observed lean HF path for Llama
+	}
+
+	// Matching key → use the calibration multiplier.
+	qwen3S3 := peakHostMemBytes(weightBytes, true, "qwen3", calib)
+	wantQwen3 := 10.0*2.8*gibBytes + hostMemBufferBytes
+	if qwen3S3 != wantQwen3 {
+		t.Errorf("qwen3+s3: got %.2f GiB, want %.2f GiB (2.8×)", qwen3S3/gibBytes, wantQwen3/gibBytes)
+	}
+	if qwen3S3 <= defaultS3 {
+		t.Errorf("qwen3 calibration should raise peak above default (1.15×); got %.2f vs default %.2f",
+			qwen3S3/gibBytes, defaultS3/gibBytes)
+	}
+
+	llamaHF := peakHostMemBytes(weightBytes, false, "llama", calib)
+	wantLlama := 10.0*1.02*gibBytes + hostMemBufferBytes
+	if llamaHF != wantLlama {
+		t.Errorf("llama+hf: got %.2f GiB, want %.2f GiB (1.02×)", llamaHF/gibBytes, wantLlama/gibBytes)
+	}
+	if llamaHF >= defaultHF {
+		t.Errorf("llama calibration should lower peak vs default (1.08×); got %.2f vs default %.2f",
+			llamaHF/gibBytes, defaultHF/gibBytes)
+	}
+
+	// Non-matching family → default unchanged.
+	mistralHF := peakHostMemBytes(weightBytes, false, "mistral", calib)
+	if mistralHF != defaultHF {
+		t.Errorf("mistral (uncalibrated): got %.2f GiB, want default %.2f GiB",
+			mistralHF/gibBytes, defaultHF/gibBytes)
+	}
+
+	// Loader mismatch → default unchanged.
+	qwen3HF := peakHostMemBytes(weightBytes, false, "qwen3", calib)
+	if qwen3HF != defaultHF {
+		t.Errorf("qwen3+hf (only s3 calibrated): got %.2f GiB, want default %.2f GiB",
+			qwen3HF/gibBytes, defaultHF/gibBytes)
+	}
+
+	// Empty family or nil map → default unchanged.
+	if peakHostMemBytes(weightBytes, true, "", calib) != defaultS3 {
+		t.Error("empty family should use default")
+	}
+	if peakHostMemBytes(weightBytes, true, "qwen3", nil) != defaultS3 {
+		t.Error("nil calibration map should use default")
+	}
+}
+
 func TestPeakHostMemBytes_Multipliers(t *testing.T) {
 	const weightBytes = 10.0 * gibBytes
-	hf := peakHostMemBytes(weightBytes, false)
-	s3 := peakHostMemBytes(weightBytes, true)
+	hf := peakHostMemBytes(weightBytes, false, "", nil)
+	s3 := peakHostMemBytes(weightBytes, true, "", nil)
 
-	// HF path ~= 10 × 1.3 + 3 = 16 GiB
+	// HF path: 10 × 1.08 + 2 = ~12.8 GiB (matches measured Phi-4 peak within ~5%).
 	expectHF := 10.0*hfLoaderHostMultiplier*gibBytes + hostMemBufferBytes
 	if hf != expectHF {
 		t.Errorf("HF peak = %.2f GiB, want %.2f GiB", hf/gibBytes, expectHF/gibBytes)
 	}
 
-	// S3 path ~= 10 × 0.9 + 3 = 12 GiB, still lower than HF but not by much
+	// S3 path: 10 × 1.15 + 2 = ~13.5 GiB. Empirical ratio from 8 TP=1
+	// runs; Run:ai streamer at default RUNAI_STREAMER_MEMORY_LIMIT=-1
+	// allocates a buffer equal to the full safetensor file, so peak is
+	// slightly higher than the HF loader, not lower.
 	expectS3 := 10.0*s3StreamerHostMultiplier*gibBytes + hostMemBufferBytes
 	if s3 != expectS3 {
 		t.Errorf("S3 peak = %.2f GiB, want %.2f GiB", s3/gibBytes, expectS3/gibBytes)
 	}
-	if s3 >= hf {
-		t.Errorf("expected S3 streamer peak (%.2f GiB) < HF peak (%.2f GiB)",
+	if s3 <= hf {
+		t.Errorf("expected S3 streamer peak (%.2f GiB) > HF peak (%.2f GiB) — streamer allocates full-file buffer by default",
 			s3/gibBytes, hf/gibBytes)
 	}
 }

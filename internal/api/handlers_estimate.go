@@ -60,6 +60,10 @@ type EstimateConfig struct {
 	Concurrency          int     `json:"concurrency"`
 	InputSequenceLength  int     `json:"input_sequence_length"`
 	OutputSequenceLength int     `json:"output_sequence_length"`
+	// PRD-46: scheduler knobs from the recommender so the Estimate →
+	// Run handoff pre-fills them on the New Benchmark form.
+	MaxNumBatchedTokens int    `json:"max_num_batched_tokens,omitempty"`
+	KVCacheDtype        string `json:"kv_cache_dtype,omitempty"`
 }
 
 // MemoryEstimate shows memory breakdown.
@@ -170,6 +174,16 @@ func (s *Server) handleEstimate(w http.ResponseWriter, r *http.Request) {
 		recOpts.UseS3Streamer = true
 	}
 
+	// PRD-47 PR #5: apply per-family host-memory calibration. Model
+	// type is derived from the HF config's model_type field (populated
+	// just below once FetchModelConfig returns).
+	if calib, err := s.repo.GetHostMemCalibration(r.Context()); err == nil {
+		recOpts.HostMemCalibration = calib
+	}
+	if modelCfg != nil {
+		recOpts.ModelType = modelCfg.ModelType
+	}
+
 	// Generate estimates for each instance type
 	var estimates []EstimateRow
 	var feasibleNative, feasibleQuantized, infeasible int
@@ -226,6 +240,8 @@ func (s *Server) handleEstimate(w http.ResponseWriter, r *http.Request) {
 				Concurrency:          rec.Concurrency,
 				InputSequenceLength:  rec.InputSequenceLength,
 				OutputSequenceLength: rec.OutputSequenceLength,
+				MaxNumBatchedTokens:  rec.MaxNumBatchedTokens,
+				KVCacheDtype:         rec.KVCacheDtype,
 			}
 
 			// Apply min context filter

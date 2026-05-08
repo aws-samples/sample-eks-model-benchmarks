@@ -3,39 +3,19 @@ package database
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// extractModelFamily extracts the model family from a HuggingFace model ID.
-// Returns one of: llama, mistral, qwen, deepseek, gemma, phi, or empty string.
-// Priority: check organization name first (before /), then model name.
-func extractModelFamily(hfID string) string {
-	lower := strings.ToLower(hfID)
-	families := []string{"llama", "mistral", "qwen", "deepseek", "gemma", "phi"}
-
-	// Split into org and model name
-	parts := strings.SplitN(lower, "/", 2)
-	org := parts[0]
-
-	// Check organization name first (more reliable)
-	for _, f := range families {
-		if strings.Contains(org, f) {
-			return f
-		}
-	}
-
-	// Fall back to checking full ID (for cases like TinyLlama/...)
-	for _, f := range families {
-		if strings.Contains(lower, f) {
-			return f
-		}
-	}
-	return ""
-}
+// Model family derivation moved to ModelConfig.ModelType: HF's
+// config.json carries a canonical architecture name ("llama", "qwen2",
+// "qwen3", "phi3", "mistral", "gpt_oss", …) that we use verbatim as
+// the calibration key. The recommend path populates models.model_type
+// via SetModelType when it fetches the config; callers that just have
+// an hfID (no config) leave it NULL and the calibration query ignores
+// those rows.
 
 // Repository provides database operations for benchmark data.
 type Repository struct {
@@ -69,9 +49,9 @@ func (r *Repository) Ping(ctx context.Context) error {
 func (r *Repository) GetModelByHfID(ctx context.Context, hfID, hfRevision string) (*Model, error) {
 	var m Model
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, hf_id, hf_revision, model_family, parameter_count, created_at
+		`SELECT id, hf_id, hf_revision, model_type, parameter_count, created_at
 		 FROM models WHERE hf_id = $1 AND hf_revision = $2`, hfID, hfRevision,
-	).Scan(&m.ID, &m.HfID, &m.HfRevision, &m.ModelFamily, &m.ParameterCount, &m.CreatedAt)
+	).Scan(&m.ID, &m.HfID, &m.HfRevision, &m.ModelType, &m.ParameterCount, &m.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -85,9 +65,9 @@ func (r *Repository) GetModelByHfID(ctx context.Context, hfID, hfRevision string
 func (r *Repository) GetModelByID(ctx context.Context, id string) (*Model, error) {
 	var m Model
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, hf_id, hf_revision, model_family, parameter_count, created_at
+		`SELECT id, hf_id, hf_revision, model_type, parameter_count, created_at
 		 FROM models WHERE id = $1`, id,
-	).Scan(&m.ID, &m.HfID, &m.HfRevision, &m.ModelFamily, &m.ParameterCount, &m.CreatedAt)
+	).Scan(&m.ID, &m.HfID, &m.HfRevision, &m.ModelType, &m.ParameterCount, &m.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -115,7 +95,33 @@ func (r *Repository) GetInstanceTypeByID(ctx context.Context, id string) (*Insta
 	return &it, nil
 }
 
-// EnsureModel returns an existing model or creates one if it doesn't exist.
+// SetModelParameterCount records the parameter count discovered at
+// recommend time. PRD-47 PR #5 depends on this for per-family
+// calibration — the query divides host_memory_peak_gib by weight size
+// derived from parameter_count, so rows without it are silently
+// excluded from the calibration map.
+//
+// Only writes if the stored value is NULL; parameter counts are
+// architectural and shouldn't change across revisions, so we don't
+// want a later call with stale/zero data to clobber a good reading.
+func (r *Repository) SetModelParameterCount(ctx context.Context, modelID string, params int64) error {
+	if params <= 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE models SET parameter_count = $1
+		 WHERE id = $2 AND parameter_count IS NULL`,
+		params, modelID)
+	if err != nil {
+		return fmt.Errorf("set parameter_count: %w", err)
+	}
+	return nil
+}
+
+// EnsureModel returns an existing model or creates one if it doesn't
+// exist. model_type is populated later via SetModelType on the recommend
+// path (when we have the HF config in hand), so new rows created here
+// carry NULL.
 func (r *Repository) EnsureModel(ctx context.Context, hfID, hfRevision string) (*Model, error) {
 	m, err := r.GetModelByHfID(ctx, hfID, hfRevision)
 	if err != nil {
@@ -125,64 +131,37 @@ func (r *Repository) EnsureModel(ctx context.Context, hfID, hfRevision string) (
 		return m, nil
 	}
 
-	// Extract model family from HuggingFace ID
-	family := extractModelFamily(hfID)
-	var familyPtr *string
-	if family != "" {
-		familyPtr = &family
-	}
-
 	var created Model
 	err = r.pool.QueryRow(ctx,
-		`INSERT INTO models (hf_id, hf_revision, model_family)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (hf_id, hf_revision) DO UPDATE SET model_family = COALESCE(models.model_family, EXCLUDED.model_family)
-		 RETURNING id, hf_id, hf_revision, model_family, parameter_count, created_at`,
-		hfID, hfRevision, familyPtr,
-	).Scan(&created.ID, &created.HfID, &created.HfRevision, &created.ModelFamily, &created.ParameterCount, &created.CreatedAt)
+		`INSERT INTO models (hf_id, hf_revision)
+		 VALUES ($1, $2)
+		 ON CONFLICT (hf_id, hf_revision) DO UPDATE SET hf_id = EXCLUDED.hf_id
+		 RETURNING id, hf_id, hf_revision, model_type, parameter_count, created_at`,
+		hfID, hfRevision,
+	).Scan(&created.ID, &created.HfID, &created.HfRevision, &created.ModelType, &created.ParameterCount, &created.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("upsert model: %w", err)
 	}
 	return &created, nil
 }
 
-// BackfillModelFamilies updates model_family for all models using the same
-// priority logic as extractModelFamily (org takes priority over model name).
-func (r *Repository) BackfillModelFamilies(ctx context.Context) (int64, error) {
-	var totalUpdated int64
-
-	// First pass: match by organization (higher priority)
-	// Process in order so that more specific orgs are checked first
-	families := []string{"deepseek", "llama", "mistral", "qwen", "gemma", "phi"}
-	for _, family := range families {
-		pattern := "%" + family + "%"
-		result, err := r.pool.Exec(ctx,
-			`UPDATE models SET model_family = $1
-			 WHERE model_family IS NULL
-			   AND LOWER(SPLIT_PART(hf_id, '/', 1)) LIKE $2`,
-			family, pattern,
-		)
-		if err != nil {
-			return totalUpdated, fmt.Errorf("backfill org %s: %w", family, err)
-		}
-		totalUpdated += result.RowsAffected()
+// SetModelType records the HuggingFace model_type from config.json for
+// a model. Called by the recommend path after FetchModelConfig. Only
+// writes when the stored value is NULL so revisions don't overwrite
+// each other if they disagree (architectures don't change between
+// checkpoints of the same model).
+func (r *Repository) SetModelType(ctx context.Context, modelID, modelType string) error {
+	if modelType == "" {
+		return nil
 	}
-
-	// Second pass: match by full ID (for remaining NULL values)
-	for _, family := range families {
-		pattern := "%" + family + "%"
-		result, err := r.pool.Exec(ctx,
-			`UPDATE models SET model_family = $1
-			 WHERE model_family IS NULL AND LOWER(hf_id) LIKE $2`,
-			family, pattern,
-		)
-		if err != nil {
-			return totalUpdated, fmt.Errorf("backfill full %s: %w", family, err)
-		}
-		totalUpdated += result.RowsAffected()
+	_, err := r.pool.Exec(ctx,
+		`UPDATE models SET model_type = $1
+		 WHERE id = $2 AND model_type IS NULL`,
+		modelType, modelID)
+	if err != nil {
+		return fmt.Errorf("set model_type: %w", err)
 	}
-
-	return totalUpdated, nil
+	return nil
 }
 
 // GetInstanceTypeByName returns an instance type by name, or nil if not found.
@@ -212,8 +191,8 @@ func (r *Repository) CreateBenchmarkRun(ctx context.Context, run *BenchmarkRun) 
 		     tensor_parallel_degree, quantization, concurrency,
 		     input_sequence_length, output_sequence_length, dataset_name,
 		     run_type, status, max_model_len, scenario_id,
-		     model_s3_uri)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		     model_s3_uri, max_num_batched_tokens, kv_cache_dtype)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 		 RETURNING id`,
 		run.ModelID, run.InstanceTypeID, run.Framework, run.FrameworkVersion,
 		run.TensorParallelDegree, run.Quantization, run.Concurrency,
@@ -221,6 +200,8 @@ func (r *Repository) CreateBenchmarkRun(ctx context.Context, run *BenchmarkRun) 
 		run.RunType, run.Status, nullableInt(run.MaxModelLen),
 		run.ScenarioID,
 		run.ModelS3URI,
+		run.MaxNumBatchedTokens,
+		run.KVCacheDtype,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert benchmark run: %w", err)
@@ -307,6 +288,30 @@ func (r *Repository) SetLoadgenStartedAt(ctx context.Context, runID string) erro
 	_, err := r.pool.Exec(ctx, `UPDATE benchmark_runs SET loadgen_started_at = $1 WHERE id = $2`, time.Now(), runID)
 	if err != nil {
 		return fmt.Errorf("set loadgen started: %w", err)
+	}
+	return nil
+}
+
+// SetRunHostMemoryPeak records peak container workingSet during load.
+// PRD-47: consumed by per-family p95 calibration in the recommender.
+func (r *Repository) SetRunHostMemoryPeak(ctx context.Context, runID string, gib float64) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE benchmark_runs SET host_memory_peak_gib = $1 WHERE id = $2`,
+		gib, runID)
+	if err != nil {
+		return fmt.Errorf("set host memory peak: %w", err)
+	}
+	return nil
+}
+
+// SetSuiteRunHostMemoryPeak records peak load-phase host memory for a
+// test suite run (one deployment shared across scenarios).
+func (r *Repository) SetSuiteRunHostMemoryPeak(ctx context.Context, suiteRunID string, gib float64) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE test_suite_runs SET host_memory_peak_gib = $1 WHERE id = $2`,
+		gib, suiteRunID)
+	if err != nil {
+		return fmt.Errorf("set suite host memory peak: %w", err)
 	}
 	return nil
 }
@@ -426,14 +431,18 @@ func (r *Repository) GetBenchmarkRun(ctx context.Context, runID string) (*Benchm
 		        input_sequence_length, output_sequence_length, dataset_name,
 		        run_type, max_model_len, status, error_message, superseded,
 		        started_at, loadgen_started_at, completed_at, created_at, model_s3_uri,
-		        total_cost_usd, loadgen_cost_usd, owner_pod, cancel_requested
+		        total_cost_usd, loadgen_cost_usd, owner_pod, cancel_requested,
+		        max_num_batched_tokens, scenario_id, kv_cache_dtype,
+		        host_memory_peak_gib
 		 FROM benchmark_runs WHERE id = $1`, runID,
 	).Scan(&run.ID, &run.ModelID, &run.InstanceTypeID, &run.Framework, &run.FrameworkVersion,
 		&run.TensorParallelDegree, &run.Quantization, &run.Concurrency,
 		&run.InputSequenceLength, &run.OutputSequenceLength, &run.DatasetName,
 		&run.RunType, &maxModelLen, &run.Status, &run.ErrorMessage, &run.Superseded,
 		&run.StartedAt, &run.LoadgenStartedAt, &run.CompletedAt, &run.CreatedAt, &run.ModelS3URI,
-		&run.TotalCostUSD, &run.LoadgenCostUSD, &run.OwnerPod, &run.CancelRequested)
+		&run.TotalCostUSD, &run.LoadgenCostUSD, &run.OwnerPod, &run.CancelRequested,
+		&run.MaxNumBatchedTokens, &run.ScenarioID, &run.KVCacheDtype,
+		&run.HostMemoryPeakGiB)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

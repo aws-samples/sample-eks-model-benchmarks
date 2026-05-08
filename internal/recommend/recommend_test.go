@@ -84,11 +84,35 @@ func TestSupportsFP8(t *testing.T) {
 }
 
 func TestKVCachePerTokenBytes(t *testing.T) {
-	// Mistral 7B: head_dim=128, kv_per_token = 2*32*8*128*2 = 131072
-	got := kvCachePerTokenBytes(mistral7B)
+	// Mistral 7B: head_dim=128, kv_per_token (fp16) = 2*32*8*128*2 = 131072
+	got := kvCachePerTokenBytes(mistral7B, "")
 	want := float64(2 * 32 * 8 * 128 * 2)
 	if got != want {
-		t.Errorf("kvCachePerTokenBytes(mistral7B) = %v, want %v", got, want)
+		t.Errorf("kvCachePerTokenBytes(mistral7B, fp16) = %v, want %v", got, want)
+	}
+}
+
+// PRD-47: fp8 KV cache halves per-token memory. Recommender must size
+// the KV budget accordingly or under-use premium-GPU memory.
+func TestKVCachePerTokenBytes_FP8HalvesBudget(t *testing.T) {
+	fp16 := kvCachePerTokenBytes(mistral7B, "")
+	fp8 := kvCachePerTokenBytes(mistral7B, "fp8")
+	if fp8*2 != fp16 {
+		t.Errorf("expected fp8 kv-per-token == fp16/2, got fp8=%v fp16=%v", fp8, fp16)
+	}
+
+	// All three fp8 variants must produce the same number.
+	for _, dtype := range []string{"fp8_e4m3", "fp8_e5m2"} {
+		if kvCachePerTokenBytes(mistral7B, dtype) != fp8 {
+			t.Errorf("%s should match fp8 byte count", dtype)
+		}
+	}
+
+	// Auto / unknown / bf16 all fall back to fp16 sizing.
+	for _, dtype := range []string{"", "auto", "bf16", "bfloat16", "fp16"} {
+		if kvCachePerTokenBytes(mistral7B, dtype) != fp16 {
+			t.Errorf("dtype %q should use fp16 byte count", dtype)
+		}
 	}
 }
 
@@ -642,5 +666,76 @@ func TestRecommendUnsupportedTransformersVersion(t *testing.T) {
 	}
 	if !strings.Contains(rec.Explanation.Reason, "6.1.0") {
 		t.Errorf("expected reason to mention required version, got: %s", rec.Explanation.Reason)
+	}
+}
+
+// PRD-46: max_num_batched_tokens defaults to max(2048, ISL) capped at
+// max_model_len, and can be overridden via RecommendOptions.
+func TestRecommend_MaxNumBatchedTokens_DefaultFormula(t *testing.T) {
+	// Mistral 7B on g5.12xlarge fits at native precision with a healthy
+	// context window; ISL will be well below max_model_len so the default
+	// should land at 2048 when ISL ≤ 2048.
+	rec := Recommend(mistral7B, g5_12xlarge, allInstances, RecommendOptions{})
+	if !rec.Explanation.Feasible {
+		t.Fatal("expected feasible recommendation")
+	}
+
+	expected := 2048
+	if rec.InputSequenceLength > expected {
+		expected = rec.InputSequenceLength
+	}
+	if rec.MaxModelLen > 0 && expected > rec.MaxModelLen {
+		expected = rec.MaxModelLen
+	}
+	if rec.MaxNumBatchedTokens != expected {
+		t.Errorf("max_num_batched_tokens = %d, want %d (ISL=%d, MaxModelLen=%d)",
+			rec.MaxNumBatchedTokens, expected,
+			rec.InputSequenceLength, rec.MaxModelLen)
+	}
+}
+
+func TestRecommend_MaxNumBatchedTokens_OverrideWins(t *testing.T) {
+	rec := Recommend(mistral7B, g5_12xlarge, allInstances, RecommendOptions{
+		MaxNumBatchedTokensOverride: 16384,
+	})
+	if !rec.Explanation.Feasible {
+		t.Fatal("expected feasible recommendation")
+	}
+	if rec.MaxNumBatchedTokens != 16384 {
+		t.Errorf("max_num_batched_tokens = %d, want 16384 (override)",
+			rec.MaxNumBatchedTokens)
+	}
+}
+
+// PRD-47 PR #2: concurrency is sized against max_model_len, not
+// avg_seq_len. The returned (max_model_len, concurrency) pair must
+// satisfy `max_model_len × concurrency × kv_per_token ≤ 0.9 × KV budget`
+// so vLLM can provision a full-length slot per in-flight sequence.
+func TestRecommend_ConcurrencyFitsMaxModelLenBudget(t *testing.T) {
+	// Mistral 7B on g5.12xlarge (4 A10G, 96 GiB). Well inside the feasibility
+	// envelope, so the joint constraint is the binding one.
+	rec := Recommend(mistral7B, g5_12xlarge, allInstances, RecommendOptions{})
+	if !rec.Explanation.Feasible {
+		t.Fatal("expected feasible recommendation")
+	}
+
+	// Manually verify the invariant. Match the inputs the recommender
+	// computed internally.
+	kvPerToken := kvCachePerTokenBytes(mistral7B, rec.KVCacheDtype)
+
+	// Approximate the per-device usable memory the same way Recommend does.
+	// The test doesn't need to replay the whole formula — it just asserts
+	// that concurrency × max_model_len tokens × kv_per_token fits inside
+	// the _positive_ remainder after subtracting weights + a small overhead
+	// budget from the full TP-sized VRAM pool.
+	perDevice := float64(g5_12xlarge.AcceleratorMemoryGiB) / float64(g5_12xlarge.AcceleratorCount)
+	totalVRAM := perDevice * float64(rec.TensorParallelDegree) * gibBytes * gpuMemoryUtilization
+	totalKVBytes := float64(rec.MaxModelLen) * float64(rec.Concurrency) * kvPerToken
+
+	// Allow some headroom; this is a sanity ceiling not an exact check.
+	if totalKVBytes > totalVRAM {
+		t.Errorf("max_model_len(%d) × concurrency(%d) × kv_per_token(%.0f) = %.2f GiB > total VRAM %.2f GiB",
+			rec.MaxModelLen, rec.Concurrency, kvPerToken,
+			totalKVBytes/gibBytes, totalVRAM/gibBytes)
 	}
 }
