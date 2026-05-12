@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -34,6 +35,17 @@ const listUsersMaxLimit = 60
 // validation; this guard exists to reject obvious trash before we
 // spend a round-trip.
 var emailRe = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+
+// isValidRole gates what can be written to Cognito's custom:role
+// attribute from the Users API. PRD-48 adds "viewer" alongside the
+// PRD-44 admin/user pair.
+func isValidRole(role string) bool {
+	switch role {
+	case "admin", "user", "viewer":
+		return true
+	}
+	return false
+}
 
 // UserRow is the shape returned for list/create/update/disable/enable/
 // reset responses. Mirrors the subset of Cognito fields the UI needs.
@@ -173,8 +185,8 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid email")
 		return
 	}
-	if req.Role != "admin" && req.Role != "user" {
-		writeError(w, http.StatusBadRequest, "role must be 'admin' or 'user'")
+	if !isValidRole(req.Role) {
+		writeError(w, http.StatusBadRequest, "role must be 'admin', 'user', or 'viewer'")
 		return
 	}
 	out, err := s.cognitoIDP.AdminCreateUser(r.Context(), &cip.AdminCreateUserInput{
@@ -211,13 +223,15 @@ func (s *Server) handleUpdateUserRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Role != "admin" && req.Role != "user" {
-		writeError(w, http.StatusBadRequest, "role must be 'admin' or 'user'")
+	if !isValidRole(req.Role) {
+		writeError(w, http.StatusBadRequest, "role must be 'admin', 'user', or 'viewer'")
 		return
 	}
 	p := auth.PrincipalFromContext(r.Context())
-	// Self-demote guard: an admin cannot downgrade themselves.
-	if p != nil && p.Sub == sub && p.Role == "admin" && req.Role == "user" {
+	// Self-demote guard: an admin cannot downgrade themselves to any
+	// non-admin role. PRD-48 extends this from user-only to viewer
+	// too, so an admin can't lock themselves into view-only access.
+	if p != nil && p.Sub == sub && p.Role == "admin" && req.Role != "admin" {
 		writeError(w, http.StatusBadRequest, "cannot demote yourself; have another admin perform this change")
 		return
 	}
@@ -344,6 +358,56 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, row)
 }
 
+// handleResendInvite: POST /api/v1/users/{sub}/resend-invite
+//
+// Re-issues the initial invitation email to a user still in the
+// FORCE_CHANGE_PASSWORD state (never completed first login). Cognito
+// won't honor AdminResetUserPassword on those users when the pool has
+// no self-service recovery mechanism, so this is the admin-correct way
+// to get them back a temporary password.
+//
+// Uses AdminCreateUser with MessageActionType=RESEND, which Cognito
+// treats as "find the existing user, regenerate a temp password, and
+// re-send the invite email."
+func (s *Server) handleResendInvite(w http.ResponseWriter, r *http.Request) {
+	if s.cognitoIDP == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth_unavailable")
+		return
+	}
+	sub := r.PathValue("sub")
+	if sub == "" {
+		writeError(w, http.StatusBadRequest, "missing sub")
+		return
+	}
+	// Cognito's RESEND flow expects the email (the attribute the user was
+	// originally created with) as Username, not the sub UUID. Look up the
+	// email first.
+	cur, err := s.cognitoIDP.AdminGetUser(r.Context(), &cip.AdminGetUserInput{
+		UserPoolId: aws.String(s.authConfig.UserPoolID),
+		Username:   aws.String(sub),
+	})
+	if err != nil {
+		mapCognitoAdminError(w, err, "get user")
+		return
+	}
+	email := attrValue(cur.UserAttributes, "email")
+	if email == "" {
+		writeError(w, http.StatusBadRequest, "user has no email attribute")
+		return
+	}
+	if _, err := s.cognitoIDP.AdminCreateUser(r.Context(), &cip.AdminCreateUserInput{
+		UserPoolId:             aws.String(s.authConfig.UserPoolID),
+		Username:               aws.String(email),
+		MessageAction:          types.MessageActionTypeResend,
+		DesiredDeliveryMediums: []types.DeliveryMediumType{types.DeliveryMediumTypeEmail},
+	}); err != nil {
+		mapCognitoAdminError(w, err, "resend invite")
+		return
+	}
+	s.audit(r.Context(), "POST /api/v1/users/"+sub+"/resend-invite", "resend-invite "+email)
+	writeJSON(w, http.StatusOK, rowFromAdminGet(cur))
+}
+
 // handleDeleteUser: DELETE /api/v1/users/{sub}
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if s.cognitoIDP == nil {
@@ -401,9 +465,20 @@ func mapCognitoAdminError(w http.ResponseWriter, err error, context string) {
 			writeError(w, http.StatusTooManyRequests, "cognito rate limit; retry")
 			return
 		}
+		// Pass through the Cognito error code + message so operators can
+		// see *why* an action failed. Previously we returned "upstream_error"
+		// for everything unrecognized, which hid e.g. "NotAuthorizedException:
+		// This userpool does not have password recovery mechanism" — the
+		// message that surfaces when AdminResetUserPassword is called on a
+		// user still in FORCE_CHANGE_PASSWORD state.
+		log.Printf("cognito %s: %s: %s", context, apiErr.ErrorCode(), apiErr.ErrorMessage())
+		writeError(w, http.StatusBadGateway,
+			fmt.Sprintf("%s: %s", apiErr.ErrorCode(), apiErr.ErrorMessage()))
+		return
 	}
-	// Swallow context in a log so ops can trace, return generic to client.
-	_ = context
+	// Non-APIError failure (network, SDK bug). Log the raw error and
+	// return generic.
+	log.Printf("cognito %s: %v", context, err)
 	writeError(w, http.StatusBadGateway, "upstream_error")
 }
 
