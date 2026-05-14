@@ -12,7 +12,7 @@ import (
 	"github.com/accelbench/accelbench/internal/database"
 )
 
-// Client wraps HTTP calls to the AccelBench API.
+// Client wraps HTTP calls to the EKSBench API.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client

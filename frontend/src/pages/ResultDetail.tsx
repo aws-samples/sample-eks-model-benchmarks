@@ -221,7 +221,12 @@ export default function ResultDetail() {
             { label: "Output Seq", value: run.output_sequence_length },
             {
               label: "Load Format",
-              value: run.model_s3_uri ? "runai_streamer" : "Huggingface",
+              // PRD-50: streamer is used iff the model is S3-backed.
+              // The off toggle was removed since vLLM's default loader
+              // doesn't work against S3 URIs on EKS Pod Identity.
+              value: run.model_s3_uri
+                ? `runai_streamer${run.streamer_memory_limit_gib ? ` (limit=${run.streamer_memory_limit_gib}Gi` : " (limit=auto"}${run.streamer_concurrency ? `, concurrency=${run.streamer_concurrency}` : ", concurrency=16"})`
+                : "Huggingface",
             },
             {
               label: "Model Source",
@@ -231,10 +236,9 @@ export default function ResultDetail() {
               label: "Max Num Batched Tokens",
               value: run.max_num_batched_tokens ?? null,
             },
-            {
-              label: "Max Num Seqs",
-              value: run.concurrency ?? null,
-            },
+            // PRD-51: max_num_seqs is no longer wired from concurrency.
+            // The orchestrator lets vLLM use its upstream default (256).
+            // "Concurrency" above still shows what loadgen submits.
             {
               label: "KV Cache Dtype",
               value: run.kv_cache_dtype ?? null,

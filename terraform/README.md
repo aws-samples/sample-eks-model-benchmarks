@@ -1,6 +1,6 @@
-# AccelBench Terraform
+# EKSBench Terraform
 
-This directory provisions the AWS infrastructure that backs AccelBench: EKS
+This directory provisions the AWS infrastructure that backs EKSBench: EKS
 cluster, Karpenter, Aurora PostgreSQL, ECR repos, S3 buckets, IAM roles, and
 (optionally) a public HTTPS ingress.
 

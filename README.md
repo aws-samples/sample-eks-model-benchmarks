@@ -1,4 +1,4 @@
-# AccelBench
+# EKSBench
 
 A self-hosted benchmarking platform for LLM inference on AWS accelerated instances. Deploy any HuggingFace model onto GPU or Neuron instances, run standardized load tests, and compare latency, throughput, GPU utilization, and cost across configurations.
 

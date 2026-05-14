@@ -17,7 +17,7 @@ type LoadgenOutput struct {
 }
 
 // RequestResult holds per-request measurements from the load generator.
-// Supports both legacy AccelBench loadgen and inference-perf output formats.
+// Supports both legacy EKSBench loadgen and inference-perf output formats.
 type RequestResult struct {
 	TTFTMs          float64 `json:"ttft_ms"`
 	E2ELatencyMs    float64 `json:"e2e_latency_ms"`
@@ -35,7 +35,7 @@ type RequestResult struct {
 }
 
 // Summary holds aggregate metrics from the load generator.
-// Supports both legacy AccelBench loadgen and inference-perf output formats.
+// Supports both legacy EKSBench loadgen and inference-perf output formats.
 type Summary struct {
 	// Legacy loadgen fields
 	TotalDurationSeconds   float64 `json:"total_duration_seconds"`
@@ -117,7 +117,7 @@ type InferencePerfOutput struct {
 func ParseLoadgenOutput(data []byte) (*LoadgenOutput, error) {
 	var out LoadgenOutput
 
-	// Strategy 1: Try direct JSON unmarshal (legacy AccelBench format)
+	// Strategy 1: Try direct JSON unmarshal (legacy EKSBench format)
 	if err := json.Unmarshal(data, &out); err == nil && len(out.Requests) > 0 {
 		return &out, nil
 	}
@@ -205,7 +205,7 @@ func convertInferencePerfOutput(ip *InferencePerfOutput) *LoadgenOutput {
 
 // ComputeMetrics takes parsed loadgen output and computes the full set of
 // benchmark metrics including p50/p90/p95/p99 percentiles.
-// Supports both legacy AccelBench loadgen and inference-perf output formats.
+// Supports both legacy EKSBench loadgen and inference-perf output formats.
 func ComputeMetrics(out *LoadgenOutput) *database.BenchmarkMetrics {
 	successful := filterSuccessful(out.Requests)
 

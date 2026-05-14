@@ -47,6 +47,18 @@ spec:
             - name: INFERENCE_PERF_IMAGE
               value: "{{ .Values.image.loadgen.repository }}:{{ .Values.image.loadgen.tag | default "latest" }}"
             {{- end }}
+            # PRD-49: When image.vllm.repository is set, VLLM_IMAGE is
+            # used verbatim as the model container image and the
+            # Docker-Hub / pull-through template path is skipped. Empty
+            # falls back to vllm/vllm-openai:<tool_versions.framework_version>.
+            # Guarded with `with` so --reuse-values against pre-PRD-49
+            # releases (no image.vllm block) doesn't nil-deref.
+            {{- with .Values.image.vllm }}
+            {{- if .repository }}
+            - name: VLLM_IMAGE
+              value: "{{ .repository }}:{{ .tag | default "latest" }}"
+            {{- end }}
+            {{- end }}
             - name: TOOLS_IMAGE
               value: "{{ .Values.image.tools.repository }}:{{ .Values.image.tools.tag }}"
             {{- if or .Values.huggingface.token .Values.huggingface.existingSecret }}
@@ -69,13 +81,19 @@ spec:
             - name: PULL_THROUGH_REGISTRY
               value: "{{ .Values.registry.pullThroughURI }}"
             {{- end }}
-            # PRD-43: Cognito auth. Populate from Terraform outputs.
+            # PRD-43 / PRD-52: Cognito auth. When cognito.authDisabled=true,
+            # emit AUTH_DISABLED=1 and skip the Cognito env vars so the
+            # backend's startup path picks the synthetic-principal mode
+            # without getting confused by empty IDs.
+            {{- if .Values.cognito.authDisabled }}
+            - name: AUTH_DISABLED
+              value: "1"
+            {{- else }}
             - name: COGNITO_USER_POOL_ID
               value: "{{ .Values.cognito.userPoolId }}"
             - name: COGNITO_CLIENT_ID
               value: "{{ .Values.cognito.clientId }}"
-            - name: AUTH_DISABLED
-              value: "{{ if .Values.cognito.authDisabled }}1{{ end }}"
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

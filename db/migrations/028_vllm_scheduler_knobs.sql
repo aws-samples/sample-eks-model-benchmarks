@@ -1,4 +1,4 @@
--- PRD-46: persist the three vLLM scheduler flags AccelBench sets
+-- PRD-46: persist the three vLLM scheduler flags EKSBench sets
 -- at deploy time so historical benchmark rows can be reproduced
 -- byte-for-byte from the DB. Only two columns are added here because
 -- --max-num-seqs is derived from `concurrency` at manifest-render

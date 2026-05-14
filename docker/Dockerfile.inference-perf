@@ -1,4 +1,4 @@
-# AccelBench's fork of the upstream inference-perf image.
+# EKSBench's fork of the upstream inference-perf image.
 #
 # Adds `sentencepiece` (and `protobuf`) so AutoTokenizer can load
 # SentencePiece-only tokenizers (Mistral, older Llama, T5). Without

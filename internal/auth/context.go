@@ -1,5 +1,5 @@
 // Package auth provides JWT verification, middleware, and authentication
-// primitives for AccelBench (PRD-43).
+// primitives for EKSBench (PRD-43).
 //
 // The middleware reads the `accelbench_access` cookie on every request,
 // verifies it as a Cognito-issued access token (signature, iss, aud,

@@ -1,4 +1,4 @@
-// Package secrets wraps AWS Secrets Manager for AccelBench's platform
+// Package secrets wraps AWS Secrets Manager for EKSBench's platform
 // credentials (PRD-31).
 //
 // Two secrets are managed:
@@ -109,7 +109,7 @@ func (m *Manager) PutHFToken(ctx context.Context, token string) error {
 		return err
 	}
 	return m.putSecretString(ctx, HFSecretID, string(payload),
-		"AccelBench platform HuggingFace token (PRD-31)")
+		"EKSBench platform HuggingFace token (PRD-31)")
 }
 
 // DeleteHFToken removes the secret (no recovery window for simplicity —

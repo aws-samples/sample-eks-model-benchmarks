@@ -60,6 +60,11 @@ export interface BenchmarkRun {
   max_model_len?: number;
   max_num_batched_tokens?: number | null;
   kv_cache_dtype?: string | null;
+  // PRD-50: Run:ai streamer knobs persisted on the run. Null means
+  // "used default" (auto / 16 / auto-sized at deploy time).
+  streamer_mode?: string | null;
+  streamer_concurrency?: number | null;
+  streamer_memory_limit_gib?: number | null;
   scenario_id?: string | null;
   model_s3_uri?: string | null;
   status: string;
@@ -155,6 +160,10 @@ export interface RunRequest {
   hf_token?: string;
   // PRD-47 PR #6: skip the host-memory feasibility check when set.
   allow_host_mem_override?: boolean;
+  // PRD-50: Run:ai streamer knobs. All optional. "" / 0 = default.
+  streamer_mode?: string;            // "" | "auto" | "off"
+  streamer_concurrency?: number;     // 0 = default (16)
+  streamer_memory_limit_gib?: number; // 0 = auto-sized
 }
 
 export interface RunListItem {
@@ -268,6 +277,10 @@ export interface RecommendResponse {
   instance_info: RecommendInstanceInfo;
   alternatives?: RecommendAlternatives;
   valid_tp_options?: number[];
+  // PRD-51: advisory messages about knob combinations that silently
+  // degrade a run (e.g. mnbt override below ISL). Non-blocking —
+  // rendered as an informational block alongside the recommendation.
+  warnings?: string[];
 }
 
 export interface InstanceType {
@@ -393,10 +406,30 @@ export interface MemoryBreakdown {
   total_used_gib: number;
   total_available_gib: number;
   headroom_gib: number;
+  // PRD-51: scheduling-realistic view. Lets the UI distinguish hard
+  // failure ("infeasible" — vLLM crashes on load) from soft clamping
+  // ("clamps" — vLLM runs at lower effective concurrency than
+  // requested). Only "infeasible" should block submission.
+  kv_pool_gib?: number;
+  max_concurrency_at_pool?: number;
+  feasibility?: "fits" | "clamps" | "infeasible";
 }
 
 export interface MemoryBreakdownResponse extends MemoryBreakdown {
   warning_message?: string;
+  // PRD-50: host RAM view. Populated alongside the GPU MemoryBreakdown.
+  // Rendered by a future PRD-51 panel; today's Run form ignores it.
+  host_memory: HostMemoryBreakdown;
+}
+
+// PRD-50: host-memory view during weight load. Separate from MemoryBreakdown
+// (which is GPU VRAM) because the streamer's CPU buffer lives in node RAM.
+export interface HostMemoryBreakdown {
+  instance_memory_gib: number;
+  streamer_buffer_gib: number;
+  framework_overhead_gib: number;
+  load_peak_gib: number;
+  headroom_gib: number;
 }
 
 // PRD-15: OOM history types
@@ -466,6 +499,10 @@ export interface SuiteRunRequest {
   hf_token?: string;
   // PRD-47 PR #6: skip the host-memory feasibility check when set.
   allow_host_mem_override?: boolean;
+  // PRD-50: Run:ai streamer knobs. All optional. "" / 0 = default.
+  streamer_mode?: string;
+  streamer_concurrency?: number;
+  streamer_memory_limit_gib?: number;
 }
 
 export interface ScenarioProgress {
@@ -558,6 +595,10 @@ export interface TestSuiteRun {
   max_num_batched_tokens?: number | null;
   max_num_seqs?: number;
   kv_cache_dtype?: string | null;
+  // PRD-50: Run:ai streamer knobs persisted on the suite run.
+  streamer_mode?: string | null;
+  streamer_concurrency?: number | null;
+  streamer_memory_limit_gib?: number | null;
   framework?: string | null;
   framework_version?: string | null;
   model_s3_uri?: string | null;
@@ -629,6 +670,10 @@ export interface ToolVersions {
   updated_at: string;
   env_override_active: boolean;
   env_override_image?: string;
+  // PRD-49: VLLM_IMAGE env var status. When active, framework_version
+  // is still saved but the orchestrator ignores it at runtime.
+  vllm_env_override_active: boolean;
+  vllm_env_override_image?: string;
 }
 
 export interface CatalogModelEntry {
@@ -768,10 +813,14 @@ export interface SuiteDetailResponse extends TestSuiteRun {
 // PRD-43: authenticated user. Populated from GET /api/v1/auth/me.
 // `sub` was added in PRD-45 so the Users page can gate self-mutation
 // row actions; omitted when the backend doesn't populate it.
+// PRD-52: `auth_disabled` is true when the backend was started with
+// AUTH_DISABLED=1 (or Cognito env vars missing). Frontend uses it to
+// hide the login page, user badge, and Users nav entry.
 export type AuthUser = {
   sub?: string;
   email: string;
   role: string;
+  auth_disabled?: boolean;
 };
 
 // PRD-45: user-management types.

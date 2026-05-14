@@ -71,12 +71,69 @@ variable "enable_cluster_creator_admin_permissions" {
   default     = true
 }
 
+variable "manage_cluster" {
+  description = <<-EOT
+    When true (default, greenfield), Terraform provisions the VPC, EKS
+    cluster, node IAM, and the cluster-level addons listed under the
+    install_* variables below.
+
+    When false (brownfield), EKSBench is installed into an EXISTING
+    EKS cluster. cluster_name, vpc_id, and private_subnet_ids become
+    required. Per-addon install_* flags let the operator skip
+    components their cluster already runs (Karpenter, ALB controller,
+    NVIDIA device plugin, Pod Identity agent, EBS CSI driver).
+
+    See docs/brownfield.md for a worked example.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "cluster_name" {
+  description = "Existing EKS cluster name. Required when manage_cluster=false. Ignored otherwise (greenfield derives it from project_name)."
+  type        = string
+  default     = ""
+}
+
+variable "vpc_id" {
+  description = "VPC holding the existing cluster. Required when manage_cluster=false."
+  type        = string
+  default     = ""
+}
+
+variable "private_subnet_ids" {
+  description = "Private subnets where EKSBench data-plane resources land (RDS, optional ALB, and the subnets Karpenter provisions nodes into). Required when manage_cluster=false."
+  type        = list(string)
+  default     = []
+}
+
 variable "manage_accelbench_namespace" {
   description = <<-EOT
     Whether Terraform should create the `accelbench` namespace and DATABASE_URL
     secret. Default true (new installs). Set to false on an existing cluster
     where the namespace was created manually, then `terraform import` the
     resources instead to avoid re-creation conflicts.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "auth_enabled" {
+  description = <<-EOT
+    When true (default), provisions Cognito + ACM/public-ingress resources
+    for in-app user authentication. Helm chart must also be deployed with
+    default cognito.authDisabled=false.
+
+    Set to false for lab / bring-up deployments where access control is
+    handled upstream (VPN, Kubernetes RBAC, port-forward). Implications:
+      - Cognito user pool + app client are NOT created.
+      - ACM cert + public DNS records are NOT created (ingress_mode is
+        forced to empty regardless of the user-supplied value).
+      - The Helm chart must be installed with cognito.authDisabled=true
+        so the api pod starts in AUTH_DISABLED=1 mode.
+      - The backend's startup log prints a loud "AUTH DISABLED" banner.
+
+    Never combine auth_enabled=false with a publicly-reachable ingress.
   EOT
   type        = bool
   default     = true
@@ -90,6 +147,39 @@ variable "install_alb_controller" {
   description = <<-EOT
     Install the AWS Load Balancer Controller (chart v3.2.2) via Helm. Set
     false if your cluster already has it from another source.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "install_karpenter_controller" {
+  description = <<-EOT
+    PRD-53: install the Karpenter controller + CRDs via Helm. Set false
+    on brownfield clusters where Karpenter is already running (>= v1.9
+    required). EKSBench's NodePools + EC2NodeClasses are applied
+    regardless — they layer on top of an existing controller.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "install_nvidia_device_plugin" {
+  description = <<-EOT
+    PRD-53: install the NVIDIA device plugin DaemonSet. Set false if the
+    cluster already runs it (check: kubectl get ds -n kube-system |
+    grep nvidia-device-plugin).
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "manage_pull_through_cache" {
+  description = <<-EOT
+    PRD-53: create an ECR pull-through cache rule for Docker Hub + grant
+    the node IAM role ECR pull-through permissions. Set false to skip
+    — operators who set image.vllm.repository in Helm values to a
+    public-ECR vLLM mirror (see docs/deployment.md) don't need the
+    cache.
   EOT
   type        = bool
   default     = true

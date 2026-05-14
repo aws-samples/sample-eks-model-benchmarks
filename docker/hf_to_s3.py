@@ -15,12 +15,45 @@ Usage:
 import argparse
 import os
 import sys
+from urllib.parse import urljoin, urlparse
 
 import boto3
 from boto3.s3.transfer import TransferConfig
 from huggingface_hub import HfApi, hf_hub_url
 from huggingface_hub.utils import build_hf_headers
 import requests
+
+# Allow any subdomain of huggingface.co / hf.co. HF uses several CDN tiers
+# (cdn-lfs.*, cas-bridge.xethub.hf.co, etc.) and adds new ones over time,
+# so we match the apex suffix rather than enumerating every subdomain.
+_ALLOWED_HF_SUFFIXES = ("huggingface.co", "hf.co")
+
+
+def _assert_hf_host(url: str) -> None:
+    p = urlparse(url)
+    host = (p.hostname or "").lower()
+    allowed = any(host == s or host.endswith("." + s) for s in _ALLOWED_HF_SUFFIXES)
+    if p.scheme != "https" or not allowed:
+        raise ValueError(f"refusing to fetch non-HuggingFace URL: {url}")
+
+
+def _stream_from_hf(url: str, headers):
+    """GET with manual redirect handling; every hop must stay on huggingface.co.
+
+    HF's CDN returns relative Location headers (e.g. /api/resolve-cache/...);
+    resolve them against the current URL before the host check. A relative
+    redirect cannot change host by definition, so it's safe.
+    """
+    for _ in range(5):
+        _assert_hf_host(url)
+        r = requests.get(url, headers=headers, stream=True, timeout=300, allow_redirects=False)
+        if r.is_redirect or r.is_permanent_redirect:
+            location = r.headers.get("Location", "")
+            r.close()
+            url = urljoin(url, location)
+            continue
+        return r
+    raise RuntimeError("too many redirects")
 
 
 def main():
@@ -62,7 +95,7 @@ def main():
         )
         print(f"[{i}/{len(files)}] {rfilename} -> s3://{args.bucket}/{key}", flush=True)
 
-        with requests.get(url, headers=headers, stream=True, timeout=300) as r:
+        with _stream_from_hf(url, headers) as r:
             r.raise_for_status()
             length = int(r.headers.get("Content-Length") or 0)
 

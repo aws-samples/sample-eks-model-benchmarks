@@ -55,6 +55,11 @@ type authMeResponse struct {
 	Sub   string `json:"sub,omitempty"`
 	Email string `json:"email"`
 	Role  string `json:"role"`
+	// PRD-52: true when the backend was started with AUTH_DISABLED=1
+	// (or Cognito env vars missing). The frontend reads this to hide
+	// the login page, user badge, and Users nav entry. Omitted from
+	// the JSON when false so existing clients see no change.
+	AuthDisabled bool `json:"auth_disabled,omitempty"`
 }
 
 // loginChallengeResponse is returned by /auth/login when Cognito requires
@@ -105,7 +110,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if out.AuthenticationResult == nil {
-		// Challenge flows. The only one AccelBench supports end-to-end is
+		// Challenge flows. The only one EKSBench supports end-to-end is
 		// NEW_PASSWORD_REQUIRED — invited users hit this on first login with
 		// their temporary password. Other challenges (SMS_MFA, etc.) fall
 		// through to a generic error; Cognito isn't configured to emit them.
@@ -166,7 +171,7 @@ func (s *Server) handleAuthRespondChallenge(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if out.AuthenticationResult == nil {
-		// Multi-step challenges aren't expected for AccelBench's pool
+		// Multi-step challenges aren't expected for EKSBench's pool
 		// config. Fail loudly rather than silently handing the client
 		// another session.
 		writeError(w, http.StatusForbidden, "challenge_required")
@@ -250,7 +255,12 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, authMeResponse{Sub: sub, Email: email, Role: role})
+	writeJSON(w, http.StatusOK, authMeResponse{
+		Sub:          sub,
+		Email:        email,
+		Role:         role,
+		AuthDisabled: s.authConfig.Disabled, // PRD-52
+	})
 }
 
 // ---------- Helpers ----------

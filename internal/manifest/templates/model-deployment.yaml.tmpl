@@ -33,12 +33,21 @@ spec:
           operator: Exists
           effect: NoSchedule
 {{- end }}
+        # PRD-53: tolerate our accelbench.io/dedicated taint.
+        - key: accelbench.io/dedicated
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
       nodeSelector:
         node.kubernetes.io/instance-type: {{ .InstanceTypeName }}
       containers:
         - name: vllm
 {{- if eq .AcceleratorType "gpu" }}
+{{- if .VLLMImageOverride }}
+          image: {{ .VLLMImageOverride }}
+{{- else }}
           image: {{ if .PullThroughRegistry }}{{ .PullThroughRegistry }}/dockerhub/{{ end }}vllm/vllm-openai:{{ .FrameworkVersion }}
+{{- end }}
 {{- else }}
           image: public.ecr.aws/neuron/pytorch-inference-vllm-neuronx:0.13.0-neuronx-py312-sdk2.28.0-ubuntu24.04
 {{- end }}
@@ -55,9 +64,15 @@ spec:
             - name: NCCL_P2P_LEVEL
               value: "NVL"
 {{- end }}
+{{- if and .UseRunaiStreamer (gt .StreamerMemoryLimitGiB 0) }}
+            # PRD-50: cap the Run:ai streamer's shared CPU buffer. The
+            # upstream default is 40 GB, which exceeds small-instance RAM.
+            - name: RUNAI_STREAMER_MEMORY_LIMIT
+              value: "{{ gibBytes .StreamerMemoryLimitGiB }}"
+{{- end }}
 {{- if eq .AcceleratorType "gpu" }}
           args:
-{{- if .ModelS3URI }}
+{{- if .UseRunaiStreamer }}
             - "--model"
             - "{{ .ModelS3URI }}"
             - "--load-format"

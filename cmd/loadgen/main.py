@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AccelBench load generator.
+"""EKSBench load generator.
 
 Sends concurrent streaming requests to a vLLM-compatible /v1/completions
 endpoint, measures TTFT / E2E latency / ITL, and prints a JSON report

@@ -1,4 +1,4 @@
-# AccelBench Terraform variables. Copy this file to terraform.tfvars
+# EKSBench Terraform variables. Copy this file to terraform.tfvars
 # (gitignored) and edit as needed. Only non-default values need to appear;
 # all variables have defaults in variables.tf.
 

@@ -17,11 +17,11 @@ var (
 // RootCmd is the top-level CLI command.
 var RootCmd = &cobra.Command{
 	Use:   "accelbench",
-	Short: "AccelBench CLI — benchmark LLMs on AWS accelerated instances",
+	Short: "EKSBench CLI — benchmark LLMs on AWS accelerated instances",
 }
 
 func init() {
-	RootCmd.PersistentFlags().StringVar(&apiURL, "api-url", envOrDefault("ACCELBENCH_API_URL", "http://localhost:8080"), "AccelBench API base URL")
+	RootCmd.PersistentFlags().StringVar(&apiURL, "api-url", envOrDefault("ACCELBENCH_API_URL", "http://localhost:8080"), "EKSBench API base URL")
 	RootCmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "table", "Output format: table, json, csv")
 }
 

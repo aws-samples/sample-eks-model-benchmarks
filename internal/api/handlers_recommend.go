@@ -23,6 +23,9 @@ type MemoryBreakdownRequest struct {
 type MemoryBreakdownResponse struct {
 	recommend.MemoryBreakdown
 	WarningMessage string `json:"warning_message,omitempty"`
+	// PRD-50: host-memory view. Separate struct because host RAM and GPU
+	// VRAM are distinct resources with different failure modes.
+	HostMemory recommend.HostMemoryBreakdown `json:"host_memory"`
 }
 
 // handleMemoryBreakdown returns a detailed memory breakdown for given configuration.
@@ -51,6 +54,12 @@ func (s *Server) handleMemoryBreakdown(w http.ResponseWriter, r *http.Request) {
 	fmt.Sscanf(q.Get("overhead_gib"), "%f", &overheadGiB)
 	quant = q.Get("quantization")
 	kvCacheDtype := q.Get("kv_cache_dtype")
+
+	// PRD-50 follow-up: streamer is implied by S3-cached model; the
+	// user-facing mode toggle was removed. streamer_memory_limit_gib
+	// still applies as a tuning knob.
+	var streamerMemLimitGiB int
+	fmt.Sscanf(q.Get("streamer_memory_limit_gib"), "%d", &streamerMemLimitGiB)
 
 	// Fetch model config (from S3 cache if available, else HuggingFace).
 	modelCfg, err := s.FetchModelConfig(r.Context(), modelID, hfToken)
@@ -134,8 +143,22 @@ func (s *Server) handleMemoryBreakdown(w http.ResponseWriter, r *http.Request) {
 		perDeviceGiB,
 	)
 
+	// Streamer is used iff the model is S3-cached. The mode toggle
+	// was removed in the PRD-50 follow-up.
+	streamerActive := false
+	if cached, _ := s.repo.GetModelCacheByHfID(r.Context(), modelID, "main"); cached != nil && cached.Status == "cached" {
+		streamerActive = true
+	}
+	hostBreakdown := recommend.CalculateHostMemoryBreakdown(
+		streamerActive,
+		breakdown.ModelWeightsGiB,
+		streamerMemLimitGiB,
+		instType.MemoryGiB,
+	)
+
 	resp := MemoryBreakdownResponse{
 		MemoryBreakdown: breakdown,
+		HostMemory:      hostBreakdown,
 	}
 
 	// Add warning if memory usage is high

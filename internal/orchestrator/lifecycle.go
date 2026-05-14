@@ -353,6 +353,32 @@ func (o *Orchestrator) deployModel(ctx context.Context, ns, name string, cfg Run
 		}
 	}
 
+	// PRD-50 follow-up: the streamer is always used for S3-backed
+	// models. vLLM's default loader against an S3 URI fails in
+	// maybe_pull_model_tokenizer_for_runai before weights even load
+	// (runai-model-streamer-s3's boto3 client doesn't resolve EKS
+	// Pod Identity credentials cleanly). The user-facing streamer_mode
+	// toggle was removed; memory_limit + concurrency remain as knobs
+	// that tune the streamer itself.
+
+	// PRD-50: concurrency knob. 0 = default (16, matching the upstream
+	// RUNAI_STREAMER_CONCURRENCY default on filesystem / was our
+	// hardcode before this PRD).
+	streamerConcurrency := cfg.Request.StreamerConcurrency
+	if streamerConcurrency == 0 {
+		streamerConcurrency = 16
+	}
+
+	// PRD-50: memory-limit knob. 0 = auto-size at half the node RAM.
+	// min(weight, instance_mem/2) isn't computed here — we let the
+	// streamer itself cap against the weight file size by passing the
+	// instance-based cap as RUNAI_STREAMER_MEMORY_LIMIT. Zero on the
+	// rendered env means "emit no env var; use the upstream default".
+	streamerMemLimitGiB := cfg.Request.StreamerMemoryLimitGiB
+	if streamerMemLimitGiB == 0 {
+		streamerMemLimitGiB = max(1, cfg.InstanceType.MemoryGiB/2)
+	}
+
 	var modelServiceAccount string
 	if useRunai {
 		modelServiceAccount = "accelbench-model"
@@ -374,15 +400,23 @@ func (o *Orchestrator) deployModel(ctx context.Context, ns, name string, cfg Run
 		InstanceFamily:       cfg.InstanceType.Family,
 		MaxModelLen:          cfg.Request.MaxModelLen,
 		MaxNumBatchedTokens:  cfg.Request.MaxNumBatchedTokens,
-		MaxNumSeqs:           cfg.Request.Concurrency,
-		KVCacheDtype:         cfg.Request.KVCacheDtype,
+		// PRD-51: don't emit --max-num-seqs. Wiring it to the form's
+		// concurrency field was wrong for open-loop scenarios where
+		// steady-state in-flight count is `rate × latency`, not a
+		// closed-loop worker count. Letting vLLM use its upstream
+		// default of 256 works for both open- and closed-loop loads;
+		// KV cache stays the binding constraint via PRD-47's math.
+		MaxNumSeqs:   0,
+		KVCacheDtype: cfg.Request.KVCacheDtype,
 		CPURequest:           cpuReq,
 		MemoryRequest:        memReq,
 		ModelS3URI:           modelS3URI,
-		UseRunaiStreamer:     useRunai,
-		ModelServiceAccount:  modelServiceAccount,
-		StreamerConcurrency:  16,
-		PullThroughRegistry:  os.Getenv("PULL_THROUGH_REGISTRY"),
+		UseRunaiStreamer:        useRunai,
+		ModelServiceAccount:     modelServiceAccount,
+		StreamerConcurrency:     streamerConcurrency,
+		StreamerMemoryLimitGiB:  streamerMemLimitGiB,
+		PullThroughRegistry:     os.Getenv("PULL_THROUGH_REGISTRY"),
+		VLLMImageOverride:       ResolveVLLMImageOverride(),
 	})
 	if err != nil {
 		return err

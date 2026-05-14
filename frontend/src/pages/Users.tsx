@@ -12,7 +12,7 @@ import {
 } from "../api";
 import { useAuth } from "../components/AuthProvider";
 
-// PRD-48: the three roles AccelBench recognizes. Mirrors the backend
+// PRD-48: the three roles EKSBench recognizes. Mirrors the backend
 // isValidRole gate in internal/api/handlers_users.go.
 type UserRole = "admin" | "user" | "viewer";
 

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: accelbench
-description: AccelBench — LLM inference benchmarking platform for AWS accelerated instances
+description: EKSBench — LLM inference benchmarking platform for AWS accelerated instances
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
@@ -15,4 +15,4 @@ home: https://github.com/accelbench/accelbench
 sources:
   - https://github.com/accelbench/accelbench
 maintainers:
-  - name: AccelBench
+  - name: EKSBench

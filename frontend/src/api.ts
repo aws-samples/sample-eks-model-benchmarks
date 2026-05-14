@@ -273,12 +273,29 @@ export async function getRecommendation(
   hfToken?: string,
   tp?: number,
   overheadGiB?: number,
-  maxModelLen?: number
+  maxModelLen?: number,
+  // PRD-51: pass the user's mnbt override so the backend can emit the
+  // "mnbt < ISL" warning. Without this the recommender's warning guard
+  // (MaxNumBatchedTokensOverride > 0) never fires.
+  maxNumBatchedTokens?: number,
+  // PRD-50: streamer memory limit influences the host-memory
+  // feasibility check and the (PRD-51) "streamer_memory_limit
+  // approaches instance RAM" warning. The streamer-off toggle was
+  // removed — the streamer is always used for S3-backed models.
+  _unusedLegacyStreamerArg?: unknown,
+  streamerMemoryLimitGiB?: number
 ): Promise<RecommendResponse> {
+  void _unusedLegacyStreamerArg;
   const params = new URLSearchParams({ model, instance_type: instanceType });
   if (tp !== undefined && tp > 0) params.set("tp", String(tp));
   if (overheadGiB !== undefined && overheadGiB > 0) params.set("overhead_gib", String(overheadGiB));
   if (maxModelLen !== undefined && maxModelLen > 0) params.set("max_model_len", String(maxModelLen));
+  if (maxNumBatchedTokens !== undefined && maxNumBatchedTokens > 0) {
+    params.set("max_num_batched_tokens", String(maxNumBatchedTokens));
+  }
+  if (streamerMemoryLimitGiB !== undefined && streamerMemoryLimitGiB > 0) {
+    params.set("streamer_memory_limit_gib", String(streamerMemoryLimitGiB));
+  }
   const headers: Record<string, string> = {};
   if (hfToken) headers["X-HF-Token"] = hfToken;
   return fetchJSON<RecommendResponse>(`${BASE}/recommend?${params}`, { headers });
@@ -330,6 +347,9 @@ export interface MemoryBreakdownParams {
   concurrency?: number;
   overheadGiB?: number;
   hfToken?: string;
+  // PRD-50: streamer memory limit. The auto/off toggle was removed;
+  // the streamer is implied by the model being S3-cached.
+  streamerMemoryLimitGiB?: number;
 }
 
 export async function getMemoryBreakdown(
@@ -346,6 +366,7 @@ export async function getMemoryBreakdown(
   if (params.outputSeqLen) urlParams.set("output_seq_len", String(params.outputSeqLen));
   if (params.concurrency) urlParams.set("concurrency", String(params.concurrency));
   if (params.overheadGiB) urlParams.set("overhead_gib", String(params.overheadGiB));
+  if (params.streamerMemoryLimitGiB) urlParams.set("streamer_memory_limit_gib", String(params.streamerMemoryLimitGiB));
 
   const headers: Record<string, string> = {};
   if (params.hfToken) headers["X-HF-Token"] = params.hfToken;
@@ -456,7 +477,11 @@ export async function getModelCache(id: string): Promise<ModelCache> {
 }
 
 export async function deleteModelCache(id: string): Promise<void> {
-  await fetch(`${BASE}/model-cache/${id}`, { method: "DELETE" });
+  await fetchJSON<unknown>(`${BASE}/model-cache/${id}`, { method: "DELETE" });
+}
+
+export async function cancelModelCache(id: string): Promise<void> {
+  await fetchJSON<unknown>(`${BASE}/model-cache/${id}/cancel`, { method: "POST" });
 }
 
 export async function registerCustomModel(req: RegisterCustomModelRequest): Promise<ModelCache> {

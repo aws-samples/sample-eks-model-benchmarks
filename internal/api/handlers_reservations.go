@@ -35,7 +35,7 @@ type EC2Client interface {
 // Tests pass a fake dynamic.Interface from client-go/dynamic/fake.
 type DynamicClient = dynamic.Interface
 
-// Hard-coded NodeClass/NodePool mapping for AccelBench. Both happen to share
+// Hard-coded NodeClass/NodePool mapping for EKSBench. Both happen to share
 // the same name per resource kind. This list is what the GET response
 // enumerates.
 var reservationNodePools = []nodePoolConfig{
@@ -458,7 +458,7 @@ func reservationIDsFromNodeClass(u *unstructured.Unstructured) []string {
 }
 
 func subnetAZsFromNodeClass(u *unstructured.Unstructured) []string {
-	// AccelBench's NodeClasses select subnets by tag, so spec.subnetSelectorTerms
+	// EKSBench's NodeClasses select subnets by tag, so spec.subnetSelectorTerms
 	// doesn't directly list AZs. Karpenter resolves them and writes the result
 	// to status.subnets[*].zone at runtime.
 	subs, _, _ := unstructured.NestedSlice(u.Object, "status", "subnets")

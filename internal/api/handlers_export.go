@@ -88,6 +88,20 @@ type manifestData struct {
 	MemoryRequest        string
 	ShmSize              string
 	PullThroughRegistry  string // ECR pull-through cache host (empty = direct Docker Hub)
+	// PRD-49: full vLLM image URI override. When non-empty, the template
+	// uses it verbatim and skips the PullThroughRegistry/FrameworkVersion
+	// path. Sourced from the same VLLM_IMAGE env var the orchestrator
+	// reads, so exports match what ran.
+	VLLMImageOverride    string
+	// PRD-50: Run:ai streamer knobs. UseRunaiStreamer is the resolved
+	// decision (streamer_mode != "off" && model had an S3 URI). When
+	// false, the template emits the HuggingFace-style loader even if
+	// ModelS3URI is set — matching what streamer_mode=off produced at
+	// runtime.
+	UseRunaiStreamer       bool
+	StreamerConcurrency    int   // 0 → template default of 16
+	StreamerMemoryLimitGiB int   // 0 → emit no env var, inherit upstream 40 GB default
+	StreamerMemoryLimitBytes int64 // derived for the env-var value
 }
 
 func generateManifest(d *database.RunExportDetails) (string, error) {
@@ -98,13 +112,23 @@ func generateManifest(d *database.RunExportDetails) (string, error) {
 		FrameworkVersion:     d.FrameworkVersion,
 		TensorParallelDegree: d.TensorParallelDegree,
 		MaxModelLen:          d.MaxModelLen,
-		MaxNumSeqs:           d.Concurrency,
-		AcceleratorType:      d.AcceleratorType,
+		// PRD-51: PRD-46's --max-num-seqs=concurrency wiring starved
+		// open-loop scenarios (steady-state in-flight is rate×latency,
+		// not worker count). The live orchestrator now omits the flag
+		// and lets vLLM pick 256. Exports mirror the new behavior so
+		// a re-apply matches what a fresh run would deploy. Pre-PRD-51
+		// historical exports will differ from what originally ran, but
+		// that's the point — re-applying should use the corrected
+		// scheduler config.
+		MaxNumSeqs:      0,
+		AcceleratorType: d.AcceleratorType,
 		AcceleratorCount:     d.AcceleratorCount,
 		CPURequest:           fmt.Sprintf("%d", max(d.VCPUs/2, 4)),
 		MemoryRequest:        fmt.Sprintf("%dGi", max(d.MemoryGiB/2, 16)),
 		ShmSize:              "16Gi",
 		PullThroughRegistry:  os.Getenv("PULL_THROUGH_REGISTRY"),
+		VLLMImageOverride:    os.Getenv("VLLM_IMAGE"),
+		UseRunaiStreamer:     d.UseRunaiStreamer,
 	}
 	if d.MaxNumBatchedTokens != nil {
 		data.MaxNumBatchedTokens = *d.MaxNumBatchedTokens
@@ -121,6 +145,18 @@ func generateManifest(d *database.RunExportDetails) (string, error) {
 		data.Quantization = *d.Quantization
 	}
 
+	// PRD-50: streamer knobs. Concurrency defaults to 16 when null.
+	// Memory limit is rendered as bytes in the env var.
+	if d.StreamerConcurrency != nil && *d.StreamerConcurrency > 0 {
+		data.StreamerConcurrency = *d.StreamerConcurrency
+	} else {
+		data.StreamerConcurrency = 16
+	}
+	if d.StreamerMemoryLimitGiB != nil && *d.StreamerMemoryLimitGiB > 0 {
+		data.StreamerMemoryLimitGiB = *d.StreamerMemoryLimitGiB
+		data.StreamerMemoryLimitBytes = int64(*d.StreamerMemoryLimitGiB) * 1024 * 1024 * 1024
+	}
+
 	var buf bytes.Buffer
 	if err := manifestTemplate.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("execute template: %w", err)
@@ -134,20 +170,21 @@ var manifestFuncs = template.FuncMap{
 }
 
 var manifestTemplate = template.Must(template.New("manifest").Funcs(manifestFuncs).Parse(`# Kubernetes manifest for vLLM model deployment
-# Generated from AccelBench benchmark run
+# Generated from EKSBench benchmark run
 #
 # Model: {{ .ModelHfID }}
 {{- if .ModelS3URI }}
-# Weights: {{ .ModelS3URI }} (loaded via Run:ai Model Streamer)
+{{- if .UseRunaiStreamer }}
+# Weights: {{ .ModelS3URI }} (loaded via Run:ai Model Streamer, concurrency={{ .StreamerConcurrency }}{{ if gt .StreamerMemoryLimitGiB 0 }}, memory_limit={{ .StreamerMemoryLimitGiB }} GiB{{ end }})
+{{- else }}
+# Weights: {{ .ModelS3URI }} (streamer disabled on original run)
+{{- end }}
 {{- end }}
 # Instance: {{ .InstanceType }}
 # Tensor Parallel: {{ .TensorParallelDegree }}
 # Max Model Length: {{ .MaxModelLen }}
 {{- if gt .MaxNumBatchedTokens 0 }}
 # Max Num Batched Tokens: {{ .MaxNumBatchedTokens }}
-{{- end }}
-{{- if gt .MaxNumSeqs 0 }}
-# Max Num Seqs: {{ .MaxNumSeqs }}
 {{- end }}
 {{- if .KVCacheDtype }}
 # KV Cache Dtype: {{ .KVCacheDtype }}
@@ -161,7 +198,7 @@ var manifestTemplate = template.Must(template.New("manifest").Funcs(manifestFunc
 # 1. Pod must have read access to the S3 bucket holding the model weights.
 #    The template uses a ServiceAccount named 'accelbench-model' that assumes
 #    an IAM role via EKS Pod Identity. If you're deploying outside the
-#    AccelBench cluster, replace this with your own SA + IAM binding.
+#    EKSBench cluster, replace this with your own SA + IAM binding.
 {{- else }}
 # 1. Create the HuggingFace token secret:
 #    kubectl create secret generic hf-token --from-literal=token=<YOUR_HF_TOKEN>
@@ -220,7 +257,11 @@ spec:
       containers:
         - name: vllm
 {{- if eq .AcceleratorType "gpu" }}
+{{- if .VLLMImageOverride }}
+          image: {{ .VLLMImageOverride }}
+{{- else }}
           image: {{ if .PullThroughRegistry }}{{ .PullThroughRegistry }}/dockerhub/{{ end }}vllm/vllm-openai:{{ .FrameworkVersion }}
+{{- end }}
 {{- else }}
           image: public.ecr.aws/neuron/pytorch-inference-vllm-neuronx:0.13.0-neuronx-py312-sdk2.28.0-ubuntu24.04
 {{- end }}
@@ -246,15 +287,24 @@ spec:
             - name: NCCL_P2P_LEVEL
               value: "NVL"
 {{- end }}
+{{- if and .UseRunaiStreamer (gt .StreamerMemoryLimitBytes 0) }}
+            # PRD-50: cap the Run:ai streamer's shared CPU buffer.
+            - name: RUNAI_STREAMER_MEMORY_LIMIT
+              value: "{{ .StreamerMemoryLimitBytes }}"
+{{- end }}
 {{- if eq .AcceleratorType "gpu" }}
           args:
-{{- if .ModelS3URI }}
+{{- if .UseRunaiStreamer }}
             - "--model"
             - "{{ .ModelS3URI }}"
             - "--load-format"
             - "runai_streamer"
             - "--model-loader-extra-config"
-            - '{"concurrency":16}'
+            - '{"concurrency":{{ .StreamerConcurrency }}}'
+{{- else if .ModelS3URI }}
+            # Streamer disabled (streamer_mode=off on the original run).
+            - "--model"
+            - "{{ .ModelS3URI }}"
 {{- else }}
             - "--model"
             - "{{ .ModelHfID }}"
@@ -264,7 +314,7 @@ spec:
             - "--tensor-parallel-size"
             - "{{ .TensorParallelDegree }}"
             - "--trust-remote-code"
-{{- if not .ModelS3URI }}
+{{- if not .UseRunaiStreamer }}
 {{- if eq .Quantization "fp16" }}
             - "--dtype"
             - "float16"
@@ -517,22 +567,32 @@ func (s *Server) handleExportSuiteManifest(w http.ResponseWriter, r *http.Reques
 
 	// Reconstruct a RunExportDetails so we can reuse generateManifest.
 	details := &database.RunExportDetails{
-		RunID:                suite.ID,
-		ModelHfID:            model.HfID,
-		ModelS3URI:           suite.ModelS3URI,
-		InstanceTypeName:     instance.Name,
-		TensorParallelDegree: suite.TensorParallelDegree,
-		Quantization:         suite.Quantization,
-		AcceleratorType:      instance.AcceleratorType,
-		AcceleratorName:      instance.AcceleratorName,
-		AcceleratorCount:     instance.AcceleratorCount,
-		AcceleratorMemoryGiB: instance.AcceleratorMemoryGiB,
-		VCPUs:                instance.VCPUs,
-		MemoryGiB:            instance.MemoryGiB,
+		RunID:                  suite.ID,
+		ModelHfID:              model.HfID,
+		ModelS3URI:             suite.ModelS3URI,
+		InstanceTypeName:       instance.Name,
+		TensorParallelDegree:   suite.TensorParallelDegree,
+		Quantization:           suite.Quantization,
+		AcceleratorType:        instance.AcceleratorType,
+		AcceleratorName:        instance.AcceleratorName,
+		AcceleratorCount:       instance.AcceleratorCount,
+		AcceleratorMemoryGiB:   instance.AcceleratorMemoryGiB,
+		VCPUs:                  instance.VCPUs,
+		MemoryGiB:              instance.MemoryGiB,
+		StreamerMode:           suite.StreamerMode,
+		StreamerConcurrency:    suite.StreamerConcurrency,
+		StreamerMemoryLimitGiB: suite.StreamerMemoryLimitGiB,
 	}
 	details.MaxModelLen = suite.MaxModelLen
 	details.MaxNumBatchedTokens = suite.MaxNumBatchedTokens
 	details.KVCacheDtype = suite.KVCacheDtype
+	// Resolve streamer-on decision the same way GetRunExportDetails does
+	// for single-run exports.
+	mode := ""
+	if suite.StreamerMode != nil {
+		mode = *suite.StreamerMode
+	}
+	details.UseRunaiStreamer = mode != "off" && suite.ModelS3URI != nil && *suite.ModelS3URI != ""
 	// PRD-46: --max-num-seqs was sized at deploy time to the busiest
 	// scenario in the suite; reproduce that value in the export by
 	// walking the suite's scenarios and taking the max NumWorkers,

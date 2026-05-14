@@ -75,6 +75,10 @@ export default function Run() {
       overhead_gib: 0, // 0 = auto-calculated
       api_type: "",
       model_s3_uri: searchParams.get("model_s3_uri") || "",
+      // PRD-50: Run:ai streamer knobs. Streamer is used iff the model
+      // is loaded from S3 — no user-facing on/off toggle anymore.
+      streamer_concurrency: Number(searchParams.get("streamer_concurrency")) || 0,
+      streamer_memory_limit_gib: Number(searchParams.get("streamer_memory_limit_gib")) || 0,
     };
   });
 
@@ -180,23 +184,43 @@ export default function Run() {
       clearTimeout(memoryBreakdownRef.current);
     }
 
-    // Debounce memory breakdown updates
+    // Debounce memory breakdown + recommendation refresh. PRD-51's
+    // warnings fire off the recommender, so we fetch both so warnings
+    // like "mnbt < ISL" appear as the user types.
     memoryBreakdownRef.current = window.setTimeout(async () => {
       setMemoryBreakdownLoading(true);
       try {
-        const breakdown = await getMemoryBreakdown({
-          model: form.model_hf_id,
-          instanceType: form.instance_type_name,
-          tp: form.tensor_parallel_degree,
-          quantization: form.quantization || undefined,
-          maxModelLen: form.max_model_len || undefined,
-          inputSeqLen: form.input_sequence_length,
-          outputSeqLen: form.output_sequence_length,
-          concurrency: form.concurrency,
-          overheadGiB: form.overhead_gib || undefined,
-          hfToken: form.hf_token || undefined,
-        });
+        const [breakdown, rec] = await Promise.all([
+          getMemoryBreakdown({
+            model: form.model_hf_id,
+            instanceType: form.instance_type_name,
+            tp: form.tensor_parallel_degree,
+            quantization: form.quantization || undefined,
+            maxModelLen: form.max_model_len || undefined,
+            inputSeqLen: form.input_sequence_length,
+            outputSeqLen: form.output_sequence_length,
+            concurrency: form.concurrency,
+            overheadGiB: form.overhead_gib || undefined,
+            hfToken: form.hf_token || undefined,
+            // PRD-50: streamer knobs influence the host-memory view.
+            streamerMemoryLimitGiB: form.streamer_memory_limit_gib || undefined,
+          }),
+          getRecommendation(
+            form.model_hf_id,
+            form.instance_type_name,
+            form.hf_token || undefined,
+            form.tensor_parallel_degree,
+            form.overhead_gib || undefined,
+            form.max_model_len || undefined,
+            form.max_num_batched_tokens || undefined,
+            undefined,
+            form.streamer_memory_limit_gib || undefined,
+          ).catch(() => null),
+        ]);
         setMemoryBreakdown(breakdown);
+        // Preserve the recommendation we already have if the refresh
+        // failed — warnings stale is better than the whole card missing.
+        if (rec) setRecommendation(rec);
       } catch (err) {
         console.error("Memory breakdown failed:", err);
       } finally {
@@ -210,7 +234,11 @@ export default function Run() {
       }
     };
   }, [
-    recommendation,
+    // Include the initial `recommendation` reference so the effect
+    // doesn't fire before the first getRecommendation resolves. After
+    // that the refresh inside replaces it; we rely on the other field
+    // deps to trigger subsequent refreshes, not `recommendation` itself.
+    Boolean(recommendation),
     form.model_hf_id,
     form.instance_type_name,
     form.tensor_parallel_degree,
@@ -219,6 +247,10 @@ export default function Run() {
     form.concurrency,
     form.overhead_gib,
     form.hf_token,
+    form.streamer_memory_limit_gib,
+    // PRD-51: mnbt change should refresh the recommendation so the
+    // "mnbt < ISL" warning appears/disappears in real time.
+    form.max_num_batched_tokens,
   ]);
 
   const handleTokenBlur = useCallback(async () => {
@@ -418,6 +450,9 @@ export default function Run() {
           model_s3_uri: form.model_s3_uri || undefined,
           hf_token: form.hf_token || undefined,
           allow_host_mem_override: allowHostMemOverride || undefined,
+          // PRD-50: streamer knobs.
+          streamer_concurrency: form.streamer_concurrency || undefined,
+          streamer_memory_limit_gib: form.streamer_memory_limit_gib || undefined,
         });
         navigate(`/suite-runs/${res.id}`);
       } else {
@@ -433,6 +468,9 @@ export default function Run() {
           dataset_name: selectedDataset,
           run_type: "on_demand",
           allow_host_mem_override: allowHostMemOverride || undefined,
+          // PRD-50: streamer knobs.
+          streamer_concurrency: form.streamer_concurrency || undefined,
+          streamer_memory_limit_gib: form.streamer_memory_limit_gib || undefined,
         });
         navigate(`/results/${res.id}`);
       }
@@ -1051,6 +1089,45 @@ export default function Run() {
             </select>
           </div>
         </div>
+
+        {/* PRD-50: Run:ai streamer controls. Only shown when weights come
+            from S3 — the streamer doesn't apply to HuggingFace downloads. */}
+        {form.model_s3_uri && (
+          <>
+            <div className="eyebrow text-ink-2 mt-2">Weight loading (Run:ai streamer)</div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="eyebrow flex items-center gap-1.5 mb-1.5">
+                  Memory Limit (GiB)
+                  <InfoTip text="Caps the streamer's shared CPU buffer during weight load. THE main knob for constraining host RAM — the upstream default is 40 GiB which exceeds small-instance RAM. 0 = auto-sized to min(weight_size, instance_memory / 2)." />
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={form.streamer_memory_limit_gib}
+                  onChange={(e) => set("streamer_memory_limit_gib", Number(e.target.value))}
+                  placeholder="0 = auto-size"
+                  className="input w-full"
+                />
+              </div>
+              <div>
+                <label className="eyebrow flex items-center gap-1.5 mb-1.5">
+                  Concurrency
+                  <InfoTip text="Number of threads filling the shared buffer. Higher = faster weight load. Does NOT affect memory usage — all threads share one buffer. Range 1-32, default 16." />
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={32}
+                  value={form.streamer_concurrency}
+                  onChange={(e) => set("streamer_concurrency", Number(e.target.value))}
+                  placeholder="0 = default (16)"
+                  className="input w-full"
+                />
+              </div>
+            </div>
+          </>
+        )}
 
         {error && (
           <p className="font-mono text-[12px] text-danger border border-danger/40 bg-danger/5 px-3 py-2">

@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-// Cookie names for the three JWTs AccelBench issues on login. Owned by
+// Cookie names for the three JWTs EKSBench issues on login. Owned by
 // this package so both the middleware and the auth handlers reference a
 // single source of truth.
 const (

@@ -1,4 +1,4 @@
--- AccelBench initial schema
+-- EKSBench initial schema
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 

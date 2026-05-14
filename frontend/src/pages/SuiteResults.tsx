@@ -154,7 +154,10 @@ export default function SuiteResults() {
           details={[
             {
               label: "Load Format",
-              value: suiteRun.model_s3_uri ? "runai_streamer" : "Huggingface",
+              // PRD-50: streamer is used iff model is S3-backed.
+              value: suiteRun.model_s3_uri
+                ? `runai_streamer${suiteRun.streamer_memory_limit_gib ? ` (limit=${suiteRun.streamer_memory_limit_gib}Gi` : " (limit=auto"}${suiteRun.streamer_concurrency ? `, concurrency=${suiteRun.streamer_concurrency}` : ", concurrency=16"})`
+                : "Huggingface",
             },
             {
               label: "Model Source",
@@ -164,10 +167,8 @@ export default function SuiteResults() {
               label: "Max Num Batched Tokens",
               value: suiteRun.max_num_batched_tokens ?? null,
             },
-            {
-              label: "Max Num Seqs",
-              value: suiteRun.max_num_seqs ?? null,
-            },
+            // PRD-51: max_num_seqs is no longer wired from concurrency.
+            // The orchestrator lets vLLM use its upstream default (256).
             {
               label: "KV Cache Dtype",
               value: suiteRun.kv_cache_dtype ?? null,

@@ -260,6 +260,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	p.Handle("GET /api/v1/model-cache/{id}", nonViewer(http.HandlerFunc(s.handleGetModelCache)))
 	p.Handle("POST /api/v1/model-cache", admin(http.HandlerFunc(s.handleCreateModelCache)))
 	p.Handle("DELETE /api/v1/model-cache/{id}", admin(http.HandlerFunc(s.handleDeleteModelCache)))
+	p.Handle("POST /api/v1/model-cache/{id}/cancel", admin(http.HandlerFunc(s.handleCancelModelCache)))
 	p.Handle("POST /api/v1/model-cache/register", admin(http.HandlerFunc(s.handleRegisterCustomModel)))
 
 	// PRD-44: the entire /api/v1/config/* surface and all Configuration-
@@ -378,6 +379,26 @@ type createRunError struct {
 
 func (e *createRunError) Error() string { return e.msg }
 
+// validateStreamerKnobs enforces the contract on the Run:ai streamer
+// knobs. Both are optional — zero means "use default". The upper
+// bound on memory limit is loose on purpose: a silly value degrades
+// to "no cap" (equivalent to streamer's -1 mode), not a crash.
+//
+// streamer_mode was removed in the PRD-50 follow-up because vLLM's
+// default loader against S3 URIs fails on EKS Pod Identity; the
+// streamer is always used for S3-backed models. `mode` is accepted
+// for back-compat but ignored.
+func validateStreamerKnobs(mode string, concurrency, memLimitGiB int) error {
+	_ = mode // back-compat shim; no longer validated
+	if concurrency < 0 || concurrency > 32 {
+		return fmt.Errorf("streamer_concurrency must be 0-32 (got %d)", concurrency)
+	}
+	if memLimitGiB < 0 {
+		return fmt.Errorf("streamer_memory_limit_gib must be >= 0 (got %d)", memLimitGiB)
+	}
+	return nil
+}
+
 // CreateRun is the internal entry point shared by handleCreateRun and the
 // catalog seeder. Returns the new run ID or a *createRunError on user error,
 // or another error on internal failure. The orchestrator is kicked off in
@@ -463,24 +484,49 @@ func (s *Server) CreateRun(ctx context.Context, req *database.RunRequest) (strin
 		v := req.KVCacheDtype
 		kvDtypePtr = &v
 	}
+
+	// PRD-50: streamer knob validation + persistence. Nil on the row
+	// means "use default" (auto / 16 / auto-sized).
+	if err := validateStreamerKnobs(req.StreamerMode, req.StreamerConcurrency, req.StreamerMemoryLimitGiB); err != nil {
+		return "", &createRunError{http.StatusBadRequest, err.Error()}
+	}
+	var streamerModePtr *string
+	if req.StreamerMode != "" {
+		v := req.StreamerMode
+		streamerModePtr = &v
+	}
+	var streamerConcurrencyPtr *int
+	if req.StreamerConcurrency > 0 {
+		n := req.StreamerConcurrency
+		streamerConcurrencyPtr = &n
+	}
+	var streamerMemLimitPtr *int
+	if req.StreamerMemoryLimitGiB > 0 {
+		n := req.StreamerMemoryLimitGiB
+		streamerMemLimitPtr = &n
+	}
+
 	run := &database.BenchmarkRun{
-		ModelID:              model.ID,
-		InstanceTypeID:       instType.ID,
-		Framework:            req.Framework,
-		FrameworkVersion:     req.FrameworkVersion,
-		TensorParallelDegree: req.TensorParallelDegree,
-		Quantization:         req.Quantization,
-		Concurrency:          req.Concurrency,
-		InputSequenceLength:  req.InputSequenceLength,
-		OutputSequenceLength: req.OutputSequenceLength,
-		DatasetName:          datasetName,
-		RunType:              runType,
-		ScenarioID:           scenarioPtr,
-		MaxModelLen:          req.MaxModelLen,
-		MaxNumBatchedTokens:  mnbtPtr,
-		KVCacheDtype:         kvDtypePtr,
-		ModelS3URI:           s3URIPtr,
-		Status:               "pending",
+		ModelID:                model.ID,
+		InstanceTypeID:         instType.ID,
+		Framework:              req.Framework,
+		FrameworkVersion:       req.FrameworkVersion,
+		TensorParallelDegree:   req.TensorParallelDegree,
+		Quantization:           req.Quantization,
+		Concurrency:            req.Concurrency,
+		InputSequenceLength:    req.InputSequenceLength,
+		OutputSequenceLength:   req.OutputSequenceLength,
+		DatasetName:            datasetName,
+		RunType:                runType,
+		ScenarioID:             scenarioPtr,
+		MaxModelLen:            req.MaxModelLen,
+		MaxNumBatchedTokens:    mnbtPtr,
+		KVCacheDtype:           kvDtypePtr,
+		StreamerMode:           streamerModePtr,
+		StreamerConcurrency:    streamerConcurrencyPtr,
+		StreamerMemoryLimitGiB: streamerMemLimitPtr,
+		ModelS3URI:             s3URIPtr,
+		Status:                 "pending",
 	}
 
 	runID, err := s.repo.CreateBenchmarkRun(ctx, run)
@@ -826,6 +872,11 @@ func (s *Server) handleRecommend(w http.ResponseWriter, r *http.Request) {
 	if maxMLStr := r.URL.Query().Get("max_model_len"); maxMLStr != "" {
 		fmt.Sscanf(maxMLStr, "%d", &opts.MaxModelLenOverride)
 	}
+	// PRD-51: accept mnbt override so the recommender can detect the
+	// "mnbt < ISL" footgun and emit a warning on the recommendation.
+	if v := r.URL.Query().Get("max_num_batched_tokens"); v != "" {
+		fmt.Sscanf(v, "%d", &opts.MaxNumBatchedTokensOverride)
+	}
 	// Make the transformers-compat warning reflect the configured vLLM tag.
 	if tv, err := s.repo.GetToolVersions(r.Context()); err == nil && tv != nil {
 		opts.VLLMVersion = tv.FrameworkVersion
@@ -837,6 +888,12 @@ func (s *Server) handleRecommend(w http.ResponseWriter, r *http.Request) {
 	// size instead of ~130%).
 	if mc, _ := s.repo.GetModelCacheByHfID(r.Context(), modelID, "main"); mc != nil && mc.Status == "cached" {
 		opts.UseS3Streamer = true
+	}
+	// PRD-51: streamer memory-limit flows into the non-streamer
+	// calibration term so the recommender sizes host-RAM peak with
+	// the user's cap in mind.
+	if v := r.URL.Query().Get("streamer_memory_limit_gib"); v != "" {
+		fmt.Sscanf(v, "%d", &opts.StreamerMemoryLimitGiB)
 	}
 
 	// PRD-47 PR #5: pass observed per-family host-memory ratios into
@@ -1221,16 +1278,41 @@ func (s *Server) handleCreateSuiteRun(w http.ResponseWriter, r *http.Request) {
 		v := req.KVCacheDtype
 		suiteKVDtypePtr = &v
 	}
+
+	// PRD-50: streamer knob validation + persistence.
+	if err := validateStreamerKnobs(req.StreamerMode, req.StreamerConcurrency, req.StreamerMemoryLimitGiB); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var suiteStreamerModePtr *string
+	if req.StreamerMode != "" {
+		v := req.StreamerMode
+		suiteStreamerModePtr = &v
+	}
+	var suiteStreamerConcurrencyPtr *int
+	if req.StreamerConcurrency > 0 {
+		n := req.StreamerConcurrency
+		suiteStreamerConcurrencyPtr = &n
+	}
+	var suiteStreamerMemLimitPtr *int
+	if req.StreamerMemoryLimitGiB > 0 {
+		n := req.StreamerMemoryLimitGiB
+		suiteStreamerMemLimitPtr = &n
+	}
+
 	suiteRun := &database.TestSuiteRun{
-		ModelID:              model.ID,
-		InstanceTypeID:       instType.ID,
-		SuiteID:              suiteID,
-		TensorParallelDegree: req.TensorParallelDegree,
-		Quantization:         req.Quantization,
-		MaxModelLen:          req.MaxModelLen,
-		MaxNumBatchedTokens:  suiteMnbtPtr,
-		KVCacheDtype:         suiteKVDtypePtr,
-		Status:               "pending",
+		ModelID:                model.ID,
+		InstanceTypeID:         instType.ID,
+		SuiteID:                suiteID,
+		TensorParallelDegree:   req.TensorParallelDegree,
+		Quantization:           req.Quantization,
+		MaxModelLen:            req.MaxModelLen,
+		MaxNumBatchedTokens:    suiteMnbtPtr,
+		KVCacheDtype:           suiteKVDtypePtr,
+		StreamerMode:           suiteStreamerModePtr,
+		StreamerConcurrency:    suiteStreamerConcurrencyPtr,
+		StreamerMemoryLimitGiB: suiteStreamerMemLimitPtr,
+		Status:                 "pending",
 	}
 	if req.Framework != "" {
 		fw := req.Framework
