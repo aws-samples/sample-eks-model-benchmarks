@@ -2,6 +2,11 @@
 
 A self-hosted benchmarking platform for LLM inference on AWS accelerated instances. Deploy any HuggingFace model onto GPU or Neuron instances, run standardized load tests, and compare latency, throughput, GPU utilization, and cost across configurations.
 
+> [!IMPORTANT]
+> **Cost disclaimer.** EKSBench runs benchmarks on NVIDIA GPU and AWS Neuron accelerators (e.g. `g5`, `g6e`, `p5`, `p5en`, `p6-b200`, `inf2`, `trn2`). These instances are billed at on-demand or reservation rates **for the entire duration the benchmark runs** — minutes for small models, tens of minutes to hours for large ones, and longer if a test suite chains multiple scenarios. A single seed run can dispatch dozens of these benchmarks in parallel. Organizations deploying this application should fully understand the cost implications before granting users access.
+>
+> Administrators can cap how much the platform is allowed to scale by adjusting the **vCPU limit on the Karpenter GPU and Neuron NodePools**. The defaults live in `terraform/modules/karpenter/main.tf` (`limits.cpu: "1000"` on each NodePool); set this to a lower number — or zero, to freeze new accelerated launches entirely — to put a hard ceiling on concurrent benchmark capacity. Pair this with EC2 service quotas, AWS Budgets / cost alerts, and per-user role assignments (the platform supports `admin` / `user` / `viewer` roles; only the first two can submit runs).
+
 ## Features
 
 - **Benchmarks catalog** — Browse and compare pre-computed results, filterable by model, instance family, and accelerator type. Side-by-side comparison of up to 4 runs.
@@ -374,6 +379,89 @@ go build ./... && go test ./... && \
   helm lint helm/accelbench && \
   (cd frontend && npm run build)
 ```
+
+## Uninstall and deprovision
+
+Tear down EKSBench in the reverse order it was installed: app first (Helm), then infrastructure (Terraform). Doing the Helm uninstall first lets Karpenter consolidate any running benchmark nodes before Terraform tries to delete the cluster.
+
+### 1. Cancel running work
+
+Cancel anything in flight from the UI (Runs page → STOP) or via the API. Helm uninstall does not preempt accelerated nodes — letting benchmarks finish (or explicitly cancelling them) avoids leaving orphaned EC2 instances behind:
+
+```bash
+# Optional: list anything still active
+kubectl get pods -n accelbench
+kubectl get nodes -l accelbench.io/dedicated  # any GPU/Neuron nodes Karpenter still owns
+```
+
+### 2. Helm uninstall
+
+```bash
+helm uninstall accelbench --namespace accelbench
+```
+
+This removes the API, web, migration, loadgen, and cache-job resources. The `accelbench` Kubernetes namespace and the `accelbench-db` secret remain (Terraform owns them).
+
+### 3. Empty the S3 buckets
+
+`terraform destroy` will not delete buckets that still contain objects. The two app buckets accumulate every benchmark result and every cached model weight, so they need to be emptied first:
+
+```bash
+aws s3 rm s3://accelbench-results-${ACCOUNT_ID} --recursive
+aws s3 rm s3://accelbench-models-${ACCOUNT_ID} --recursive
+```
+
+If versioning is enabled on these buckets, also delete the version markers — `aws s3api delete-objects` with the output of `list-object-versions`, or use the AWS console's "Empty bucket" action.
+
+### 4. Delete cached ECR images (optional)
+
+ECR repositories with images cannot be deleted by Terraform unless `force_delete = true` was set at apply time. Easiest is to clear them by hand:
+
+```bash
+for svc in api web loadgen migration cache-job tools; do
+  aws ecr batch-delete-image \
+    --repository-name accelbench-${svc} \
+    --region ${REGION} \
+    --image-ids "$(aws ecr list-images --repository-name accelbench-${svc} --region ${REGION} --query 'imageIds[*]' --output json)" \
+    >/dev/null 2>&1 || true
+done
+
+# Pull-through cache repos auto-populate; clear them too
+aws ecr describe-repositories --region ${REGION} \
+  --query 'repositories[?starts_with(repositoryName, `dockerhub/`)].repositoryName' \
+  --output text | tr '\t' '\n' | while read repo; do
+    aws ecr delete-repository --repository-name "$repo" --region ${REGION} --force
+  done
+```
+
+### 5. Terraform destroy
+
+```bash
+cd terraform
+terraform destroy
+```
+
+This removes the EKS cluster, Aurora Serverless v2 DB cluster, Karpenter NodePools/EC2NodeClasses, IAM roles + Pod Identity associations, ECR repositories, the pull-through cache rule, the AWS Load Balancer Controller install, the VPC, NAT gateways, and (if it was provisioned) the ACM certificate + Route 53 alias.
+
+> **Brownfield deployments.** If you installed into an existing EKS cluster (`manage_cluster=false`, see `docs/brownfield.md`), `terraform destroy` only removes the resources EKSBench owned — Aurora, IAM roles, ECR, Karpenter NodePools/NodeClasses tagged for EKSBench, and the namespace if `manage_accelbench_namespace=true`. It will not touch your cluster, VPC, or pre-existing Karpenter install.
+
+### 6. Verify nothing is still costing money
+
+```bash
+aws ec2 describe-instances \
+  --filters "Name=tag:karpenter.sh/nodepool,Values=gpu,neuron" \
+            "Name=instance-state-name,Values=running,pending,stopping" \
+  --region ${REGION} --query 'Reservations[].Instances[].InstanceId'
+
+aws rds describe-db-clusters --region ${REGION} \
+  --query 'DBClusters[?starts_with(DBClusterIdentifier, `accelbench`)].DBClusterIdentifier'
+
+aws s3api list-buckets --query 'Buckets[?starts_with(Name, `accelbench-`)].Name'
+```
+
+All three should return empty lists. If any GPU/Neuron instances or the Aurora cluster persist, Karpenter or RDS may have left them behind — terminate them manually and re-run `terraform destroy`.
+
+If you also want to remove any **Capacity Reservations or Capacity Blocks for ML** that were attached through the Configuration page, do that separately in the EC2 console — Terraform never created them, only referenced them.
 
 ## Security
 
