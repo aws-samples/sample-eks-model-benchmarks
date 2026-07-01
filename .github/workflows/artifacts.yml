@@ -1,0 +1,167 @@
+name: Publish Artifacts
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build & Push Images
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: docker/Dockerfile.api
+          - service: web
+            dockerfile: docker/Dockerfile.web
+          - service: loadgen
+            dockerfile: docker/Dockerfile.loadgen
+          - service: migration
+            dockerfile: docker/Dockerfile.migration
+          - service: cache-job
+            dockerfile: docker/Dockerfile.cache-job
+          - service: tools
+            dockerfile: docker/Dockerfile.tools
+          - service: inference-perf
+            dockerfile: docker/Dockerfile.inference-perf
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: "Setup Docker"
+        uses: ./.github/actions/setup-docker
+
+      - name: "Get AWS credentials"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: GithubActionsSession
+
+      - name: "Login to Amazon ECR Public"
+        id: login-ecr-public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Set image tag
+        id: tag
+        run: |
+          IMAGE_TAG="${{ inputs.version }}"
+          IMAGE_TAG="${IMAGE_TAG#v}"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.AWS_ECR_REPOSITORY }}/accelbench-${{ matrix.service }}:${{ steps.tag.outputs.image_tag }}
+            ${{ secrets.AWS_ECR_REPOSITORY }}/accelbench-${{ matrix.service }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm:
+    name: Package & Push Helm Chart
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: "Get AWS credentials"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: GithubActionsSession
+
+      - name: "Login to Amazon ECR Public (Helm OCI)"
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Package Helm chart
+        run: |
+          helm package helm/accelbench --destination /tmp/helm-packages
+
+      - name: Push Helm chart to ECR Public
+        env:
+          AWS_ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+        run: |
+          helm push /tmp/helm-packages/accelbench-*.tgz oci://${AWS_ECR_REPOSITORY}
+
+  release:
+    name: Create GitHub Release
+    needs: [build, helm]
+    if: startsWith(inputs.version, 'v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Generate release notes
+        env:
+          TAG_NAME: ${{ inputs.version }}
+          AWS_ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+        run: |
+          IMAGE_TAG="${TAG_NAME#v}"
+
+          cat > /tmp/release-notes.md << EOF
+          ## Container Images
+
+          All images published to \`${AWS_ECR_REPOSITORY}\`:
+
+          | Image | Tag |
+          |-------|-----|
+          | accelbench-api | \`${IMAGE_TAG}\` |
+          | accelbench-web | \`${IMAGE_TAG}\` |
+          | accelbench-loadgen | \`${IMAGE_TAG}\` |
+          | accelbench-migration | \`${IMAGE_TAG}\` |
+          | accelbench-cache-job | \`${IMAGE_TAG}\` |
+          | accelbench-tools | \`${IMAGE_TAG}\` |
+          | accelbench-inference-perf | \`${IMAGE_TAG}\` |
+
+          ## Helm Chart
+
+          \`\`\`bash
+          helm pull oci://${AWS_ECR_REPOSITORY}/accelbench --version ${IMAGE_TAG}
+          \`\`\`
+
+          ## Install
+
+          \`\`\`bash
+          helm install accelbench oci://${AWS_ECR_REPOSITORY}/accelbench --version ${IMAGE_TAG} \\
+            --namespace accelbench --create-namespace \\
+            --set database.existingSecret=accelbench-db \\
+            --set results.s3Bucket=accelbench-results-\$(aws sts get-caller-identity --query Account --output text) \\
+            --set models.s3Bucket=accelbench-models-\$(aws sts get-caller-identity --query Account --output text)
+          \`\`\`
+
+          Images default to \`${AWS_ECR_REPOSITORY}/accelbench-<service>:${IMAGE_TAG}\`.
+          Override with \`--set image.registry=<your-registry>\` or per-service \`--set image.api.repository=...\`.
+          EOF
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.version }}
+        run: |
+          gh release edit "${TAG_NAME}" \
+            --notes-file /tmp/release-notes.md \
+            2>/dev/null || \
+          gh release create "${TAG_NAME}" \
+            --title "${TAG_NAME}" \
+            --notes-file /tmp/release-notes.md

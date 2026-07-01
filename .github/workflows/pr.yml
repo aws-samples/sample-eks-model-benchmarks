@@ -1,0 +1,54 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "cmd/**"
+      - "internal/**"
+      - "frontend/**"
+      - "db/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build-images:
+    name: Build Images (no push)
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: docker/Dockerfile.api
+          - service: web
+            dockerfile: docker/Dockerfile.web
+          - service: loadgen
+            dockerfile: docker/Dockerfile.loadgen
+          - service: migration
+            dockerfile: docker/Dockerfile.migration
+          - service: cache-job
+            dockerfile: docker/Dockerfile.cache-job
+          - service: tools
+            dockerfile: docker/Dockerfile.tools
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: "Setup Docker"
+        uses: ./.github/actions/setup-docker
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          tags: accelbench-${{ matrix.service }}:pr-${{ github.event.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

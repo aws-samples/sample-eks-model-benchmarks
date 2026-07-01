@@ -155,21 +155,38 @@ On an **existing cluster** where the namespace was created manually (pre-this ch
 
 ### 4. Helm install
 
+**Option A: Use pre-built public images (recommended for evaluation)**
+
+If you're using the published release images from `public.ecr.aws/aws-containers`, no image configuration is needed — the chart defaults handle it:
+
 ```bash
-helm install accelbench helm/accelbench \
+helm install accelbench oci://public.ecr.aws/aws-containers/accelbench \
+  --version $(curl -s https://api.github.com/repos/aws-samples/sample-eks-model-benchmarks/releases/latest | jq -r '.tag_name | ltrimstr("v")') \
   --namespace accelbench \
-  --set image.api.repository=$REGISTRY/accelbench-api \
-  --set image.web.repository=$REGISTRY/accelbench-web \
-  --set image.loadgen.repository=$REGISTRY/accelbench-loadgen \
-  --set image.migration.repository=$REGISTRY/accelbench-migration \
-  --set image.cacheJob.repository=$REGISTRY/accelbench-cache-job \
-  --set image.tools.repository=$REGISTRY/accelbench-tools \
   --set database.existingSecret=accelbench-db \
   --set results.s3Bucket=accelbench-results-${ACCOUNT_ID} \
   --set models.s3Bucket=accelbench-models-${ACCOUNT_ID} \
   --set registry.pullThroughEnabled=true \
   --set registry.pullThroughURI=$REGISTRY
 ```
+
+**Option B: Use self-built images (development / air-gapped)**
+
+If you built and pushed images to your own registry (step 2), point the chart at your registry:
+
+```bash
+helm install accelbench helm/accelbench \
+  --namespace accelbench \
+  --set image.registry=$REGISTRY \
+  --set image.tag=latest \
+  --set database.existingSecret=accelbench-db \
+  --set results.s3Bucket=accelbench-results-${ACCOUNT_ID} \
+  --set models.s3Bucket=accelbench-models-${ACCOUNT_ID} \
+  --set registry.pullThroughEnabled=true \
+  --set registry.pullThroughURI=$REGISTRY
+```
+
+> **Image resolution:** The chart defaults to `public.ecr.aws/aws-containers/accelbench-<service>:<appVersion>`. Override `image.registry` to swap the base registry for all images, `image.tag` to change the global tag, or `image.<service>.repository`/`image.<service>.tag` for per-service control.
 
 The chart deploys:
 

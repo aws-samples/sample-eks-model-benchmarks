@@ -22,7 +22,7 @@ spec:
       {{- end }}
       containers:
         - name: migrate
-          image: "{{ .Values.image.migration.repository }}:{{ .Values.image.migration.tag }}"
+          image: "{{ include "accelbench.image" (dict "service" "migration" "Values" .Values "Chart" .Chart) }}"
           imagePullPolicy: {{ .Values.image.migration.pullPolicy }}
           env:
             - name: DATABASE_URL

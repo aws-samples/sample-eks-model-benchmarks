@@ -22,7 +22,7 @@ spec:
       {{- end }}
       containers:
         - name: nginx
-          image: "{{ .Values.image.web.repository }}:{{ .Values.image.web.tag }}"
+          image: "{{ include "accelbench.image" (dict "service" "web" "Values" .Values "Chart" .Chart) }}"
           imagePullPolicy: {{ .Values.image.web.pullPolicy }}
           ports:
             - name: http
