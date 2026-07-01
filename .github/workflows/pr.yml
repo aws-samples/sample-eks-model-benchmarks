@@ -37,13 +37,13 @@ jobs:
           - service: tools
             dockerfile: docker/Dockerfile.tools
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: "Setup Docker"
         uses: ./.github/actions/setup-docker
 
       - name: Build image (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
