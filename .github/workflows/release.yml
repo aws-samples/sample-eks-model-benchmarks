@@ -3,10 +3,6 @@ name: Release
 on:
   release:
     types: [published]
-  # TODO: Remove before merging to main — test trigger only
-  push:
-    branches:
-      - ci/add-ecr-publishing
 
 permissions:
   contents: write
@@ -16,5 +12,5 @@ jobs:
   artifacts:
     uses: ./.github/workflows/artifacts.yml
     with:
-      version: ${{ github.event.release.tag_name || 'latest' }}
+      version: ${{ github.event.release.tag_name }}
     secrets: inherit

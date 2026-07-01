@@ -102,7 +102,7 @@ jobs:
         env:
           AWS_ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
         run: |
-          helm push /tmp/helm-packages/accelbench-*.tgz oci://${AWS_ECR_REPOSITORY}/accelbench-chart
+          helm push /tmp/helm-packages/accelbench-*.tgz oci://${AWS_ECR_REPOSITORY}
 
   release:
     name: Create GitHub Release
@@ -137,7 +137,7 @@ jobs:
           ## Helm Chart
 
           \`\`\`bash
-          helm pull oci://${AWS_ECR_REPOSITORY}/accelbench-chart/accelbench --version ${IMAGE_TAG}
+          helm pull oci://${AWS_ECR_REPOSITORY}/accelbench --version ${IMAGE_TAG}
           \`\`\`
 
           ## Install
@@ -145,7 +145,7 @@ jobs:
           \`\`\`bash
           export REGISTRY=${AWS_ECR_REPOSITORY}
 
-          helm install accelbench oci://\${REGISTRY}/accelbench-chart/accelbench --version ${IMAGE_TAG} \\
+          helm install accelbench oci://\${REGISTRY}/accelbench --version ${IMAGE_TAG} \\
             --namespace accelbench --create-namespace \\
             --set image.api.repository=\${REGISTRY}/accelbench-api \\
             --set image.api.tag=${IMAGE_TAG} \\
