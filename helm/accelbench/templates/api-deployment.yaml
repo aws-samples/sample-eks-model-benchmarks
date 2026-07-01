@@ -23,7 +23,7 @@ spec:
       {{- end }}
       containers:
         - name: api
-          image: "{{ .Values.image.api.repository }}:{{ .Values.image.api.tag }}"
+          image: "{{ include "accelbench.image" (dict "service" "api" "Values" .Values "Chart" .Chart) }}"
           imagePullPolicy: {{ .Values.image.api.pullPolicy }}
           ports:
             - name: http

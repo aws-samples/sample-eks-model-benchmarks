@@ -2,48 +2,51 @@
 namespace: accelbench
 
 # -- Container images
-# Set image.*.repository to your ECR registry URLs during helm install, e.g.:
-#   --set image.api.repository=<account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-api
+# Defaults point to the public ECR registry with the chart's appVersion as tag.
+# Override image.registry to use a private registry for development, or set
+# individual image.<service>.repository / tag for fine-grained control.
 image:
+  # -- Base registry for all images. Individual repository fields default to
+  # <registry>/accelbench-<service>. Override per-service repository to point
+  # at a completely different location (e.g. a private dev ECR).
+  registry: "public.ecr.aws/aws-containers"
+  # -- Default tag for all images. Uses Chart appVersion when empty.
+  tag: ""
   api:
-    repository: ""  # Required: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-api
-    tag: "latest"
+    repository: ""  # Default: <registry>/accelbench-api
+    tag: ""         # Default: appVersion
     pullPolicy: Always
   web:
-    repository: ""  # Required: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-web
-    tag: "latest"
+    repository: ""  # Default: <registry>/accelbench-web
+    tag: ""         # Default: appVersion
     pullPolicy: Always
   tools:
-    repository: ""  # Required: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-tools
-    tag: "latest"
+    repository: ""  # Default: <registry>/accelbench-tools
+    tag: ""         # Default: appVersion
     pullPolicy: IfNotPresent
   loadgen:
-    # Optional: our ECR fork of inference-perf that adds sentencepiece
+    # Our ECR fork of inference-perf that adds sentencepiece
     # (see docker/Dockerfile.inference-perf). Set when you need Mistral
     # / older-Llama / T5-family SentencePiece tokenizer support. Leave
     # empty to fall back to upstream quay.io/inference-perf/inference-
     # perf:<tool_versions.inference_perf_version>.
-    repository: ""  # e.g. <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-loadgen
-    tag: "latest"
+    repository: ""  # Default: <registry>/accelbench-loadgen
+    tag: ""         # Default: appVersion
   vllm:
-    # PRD-49: Optional full override for the vLLM model container image.
+    # Optional full override for the vLLM model container image.
     # When repository is set, Helm passes VLLM_IMAGE=<repository>:<tag>
     # to the API pod, which the orchestrator uses verbatim — bypassing
     # the Docker-Hub / ECR pull-through cache template path. Leave empty
     # to compose the URI from tool_versions.framework_version.
-    #
-    # Typical value: the AWS-published public-ECR mirror, e.g.
-    #   repository: public.ecr.aws/vllm/vllm-openai
-    #   tag: "v0.9.0"
     repository: ""
     tag: "latest"
   migration:
-    repository: ""  # Required: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-migration
-    tag: "latest"
+    repository: ""  # Default: <registry>/accelbench-migration
+    tag: ""         # Default: appVersion
     pullPolicy: IfNotPresent
   cacheJob:
-    repository: ""  # Optional: <account-id>.dkr.ecr.<region>.amazonaws.com/accelbench-cache-job
-    tag: "latest"
+    repository: ""  # Default: <registry>/accelbench-cache-job
+    tag: ""         # Default: appVersion
 
 imagePullSecrets: []
 

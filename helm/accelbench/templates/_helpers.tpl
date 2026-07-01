@@ -83,3 +83,32 @@ Database secret name.
 {{- printf "%s-db" (include "accelbench.fullname" .) }}
 {{- end }}
 {{- end }}
+
+{{/*
+Resolve the full image reference for a service.
+Usage: {{ include "accelbench.image" (dict "service" "api" "Values" .Values "Chart" .Chart) }}
+
+Priority:
+  1. image.<service>.repository (if set) — full override
+  2. image.registry / accelbench-<service> — default from public ECR
+
+Tag priority:
+  1. image.<service>.tag (if set)
+  2. image.tag (global override)
+  3. Chart.AppVersion
+*/}}
+{{- define "accelbench.image" -}}
+{{- $svc := index .Values.image .service -}}
+{{- $repo := $svc.repository -}}
+{{- if not $repo -}}
+  {{- $repo = printf "%s/accelbench-%s" .Values.image.registry .service -}}
+{{- end -}}
+{{- $tag := $svc.tag -}}
+{{- if not $tag -}}
+  {{- $tag = .Values.image.tag -}}
+{{- end -}}
+{{- if not $tag -}}
+  {{- $tag = .Chart.AppVersion -}}
+{{- end -}}
+{{- printf "%s:%s" $repo $tag -}}
+{{- end }}

@@ -143,23 +143,15 @@ jobs:
           ## Install
 
           \`\`\`bash
-          export REGISTRY=${AWS_ECR_REPOSITORY}
-
-          helm install accelbench oci://\${REGISTRY}/accelbench --version ${IMAGE_TAG} \\
+          helm install accelbench oci://${AWS_ECR_REPOSITORY}/accelbench --version ${IMAGE_TAG} \\
             --namespace accelbench --create-namespace \\
-            --set image.api.repository=\${REGISTRY}/accelbench-api \\
-            --set image.api.tag=${IMAGE_TAG} \\
-            --set image.web.repository=\${REGISTRY}/accelbench-web \\
-            --set image.web.tag=${IMAGE_TAG} \\
-            --set image.loadgen.repository=\${REGISTRY}/accelbench-loadgen \\
-            --set image.loadgen.tag=${IMAGE_TAG} \\
-            --set image.migration.repository=\${REGISTRY}/accelbench-migration \\
-            --set image.migration.tag=${IMAGE_TAG} \\
-            --set image.cacheJob.repository=\${REGISTRY}/accelbench-cache-job \\
-            --set image.cacheJob.tag=${IMAGE_TAG} \\
-            --set image.tools.repository=\${REGISTRY}/accelbench-tools \\
-            --set image.tools.tag=${IMAGE_TAG}
+            --set database.existingSecret=accelbench-db \\
+            --set results.s3Bucket=accelbench-results-\$(aws sts get-caller-identity --query Account --output text) \\
+            --set models.s3Bucket=accelbench-models-\$(aws sts get-caller-identity --query Account --output text)
           \`\`\`
+
+          Images default to \`${AWS_ECR_REPOSITORY}/accelbench-<service>:${IMAGE_TAG}\`.
+          Override with \`--set image.registry=<your-registry>\` or per-service \`--set image.api.repository=...\`.
           EOF
 
       - name: Upload release assets
