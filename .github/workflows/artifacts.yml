@@ -5,16 +5,11 @@ on:
     inputs:
       version:
         type: string
-        default: ""
+        required: true
 
 permissions:
   contents: write
   id-token: write
-
-env:
-  # All accelbench service images to build and push.
-  # Each entry maps to docker/Dockerfile.<service>
-  SERVICES: "api web loadgen migration cache-job tools"
 
 jobs:
   build:
@@ -60,12 +55,8 @@ jobs:
       - name: Set image tag
         id: tag
         run: |
-          VERSION="${{ inputs.version }}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "-" ]; then
-            IMAGE_TAG="latest"
-          else
-            IMAGE_TAG="${VERSION#v}"
-          fi
+          IMAGE_TAG="${{ inputs.version }}"
+          IMAGE_TAG="${IMAGE_TAG#v}"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
@@ -75,21 +66,54 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
-          tags: ${{ secrets.AWS_ECR_REPOSITORY }}/accelbench-${{ matrix.service }}:${{ steps.tag.outputs.image_tag }}
+          tags: |
+            ${{ secrets.AWS_ECR_REPOSITORY }}/accelbench-${{ matrix.service }}:${{ steps.tag.outputs.image_tag }}
+            ${{ secrets.AWS_ECR_REPOSITORY }}/accelbench-${{ matrix.service }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  manifest:
-    name: Create Release
+  helm:
+    name: Package & Push Helm Chart
     needs: build
-    if: inputs.version != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create release notes
+      - name: "Get AWS credentials"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: GithubActionsSession
+
+      - name: "Login to Amazon ECR Public (Helm OCI)"
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Package Helm chart
+        run: |
+          helm package helm/accelbench --destination /tmp/helm-packages
+
+      - name: Push Helm chart to ECR Public
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+        run: |
+          helm push /tmp/helm-packages/accelbench-*.tgz oci://${AWS_ECR_REPOSITORY}/accelbench-chart
+
+  release:
+    name: Create GitHub Release
+    needs: [build, helm]
+    if: startsWith(inputs.version, 'v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate release notes
+        env:
           TAG_NAME: ${{ inputs.version }}
           AWS_ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
         run: |
@@ -102,34 +126,50 @@ jobs:
 
           | Image | Tag |
           |-------|-----|
-          | accelbench-api | ${IMAGE_TAG} |
-          | accelbench-web | ${IMAGE_TAG} |
-          | accelbench-loadgen | ${IMAGE_TAG} |
-          | accelbench-migration | ${IMAGE_TAG} |
-          | accelbench-cache-job | ${IMAGE_TAG} |
-          | accelbench-tools | ${IMAGE_TAG} |
-          | accelbench-inference-perf | ${IMAGE_TAG} |
+          | accelbench-api | \`${IMAGE_TAG}\` |
+          | accelbench-web | \`${IMAGE_TAG}\` |
+          | accelbench-loadgen | \`${IMAGE_TAG}\` |
+          | accelbench-migration | \`${IMAGE_TAG}\` |
+          | accelbench-cache-job | \`${IMAGE_TAG}\` |
+          | accelbench-tools | \`${IMAGE_TAG}\` |
+          | accelbench-inference-perf | \`${IMAGE_TAG}\` |
 
-          ### Pull images
+          ## Helm Chart
 
           \`\`\`bash
-          docker pull ${AWS_ECR_REPOSITORY}/accelbench-api:${IMAGE_TAG}
-          docker pull ${AWS_ECR_REPOSITORY}/accelbench-web:${IMAGE_TAG}
-          docker pull ${AWS_ECR_REPOSITORY}/accelbench-loadgen:${IMAGE_TAG}
-          docker pull ${AWS_ECR_REPOSITORY}/accelbench-migration:${IMAGE_TAG}
-          docker pull ${AWS_ECR_REPOSITORY}/accelbench-cache-job:${IMAGE_TAG}
-          docker pull ${AWS_ECR_REPOSITORY}/accelbench-tools:${IMAGE_TAG}
-          docker pull ${AWS_ECR_REPOSITORY}/accelbench-inference-perf:${IMAGE_TAG}
+          helm pull oci://${AWS_ECR_REPOSITORY}/accelbench-chart/accelbench --version ${IMAGE_TAG}
+          \`\`\`
+
+          ## Install
+
+          \`\`\`bash
+          export REGISTRY=${AWS_ECR_REPOSITORY}
+
+          helm install accelbench oci://\${REGISTRY}/accelbench-chart/accelbench --version ${IMAGE_TAG} \\
+            --namespace accelbench --create-namespace \\
+            --set image.api.repository=\${REGISTRY}/accelbench-api \\
+            --set image.api.tag=${IMAGE_TAG} \\
+            --set image.web.repository=\${REGISTRY}/accelbench-web \\
+            --set image.web.tag=${IMAGE_TAG} \\
+            --set image.loadgen.repository=\${REGISTRY}/accelbench-loadgen \\
+            --set image.loadgen.tag=${IMAGE_TAG} \\
+            --set image.migration.repository=\${REGISTRY}/accelbench-migration \\
+            --set image.migration.tag=${IMAGE_TAG} \\
+            --set image.cacheJob.repository=\${REGISTRY}/accelbench-cache-job \\
+            --set image.cacheJob.tag=${IMAGE_TAG} \\
+            --set image.tools.repository=\${REGISTRY}/accelbench-tools \\
+            --set image.tools.tag=${IMAGE_TAG}
           \`\`\`
           EOF
 
-      - name: Create GitHub Release
-        if: startsWith(inputs.version, 'v')
+      - name: Upload release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.version }}
         run: |
+          gh release edit "${TAG_NAME}" \
+            --notes-file /tmp/release-notes.md \
+            2>/dev/null || \
           gh release create "${TAG_NAME}" \
             --title "${TAG_NAME}" \
-            --notes-file /tmp/release-notes.md \
-            || gh release edit "${TAG_NAME}" --notes-file /tmp/release-notes.md
+            --notes-file /tmp/release-notes.md
