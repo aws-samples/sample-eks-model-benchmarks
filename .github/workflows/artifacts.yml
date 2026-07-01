@@ -1,0 +1,135 @@
+name: Publish Artifacts
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  # All accelbench service images to build and push.
+  # Each entry maps to docker/Dockerfile.<service>
+  SERVICES: "api web loadgen migration cache-job tools"
+
+jobs:
+  build:
+    name: Build & Push Images
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: docker/Dockerfile.api
+          - service: web
+            dockerfile: docker/Dockerfile.web
+          - service: loadgen
+            dockerfile: docker/Dockerfile.loadgen
+          - service: migration
+            dockerfile: docker/Dockerfile.migration
+          - service: cache-job
+            dockerfile: docker/Dockerfile.cache-job
+          - service: tools
+            dockerfile: docker/Dockerfile.tools
+          - service: inference-perf
+            dockerfile: docker/Dockerfile.inference-perf
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Setup Docker"
+        uses: ./.github/actions/setup-docker
+
+      - name: "Get AWS credentials"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: GithubActionsSession
+
+      - name: "Login to Amazon ECR Public"
+        id: login-ecr-public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Set image tag
+        id: tag
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "-" ]; then
+            IMAGE_TAG="latest"
+          else
+            IMAGE_TAG="${VERSION#v}"
+          fi
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ secrets.AWS_ECR_REPOSITORY }}/accelbench-${{ matrix.service }}:${{ steps.tag.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  manifest:
+    name: Create Release
+    needs: build
+    if: inputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.version }}
+          AWS_ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+        run: |
+          IMAGE_TAG="${TAG_NAME#v}"
+
+          cat > /tmp/release-notes.md << EOF
+          ## Container Images
+
+          All images published to \`${AWS_ECR_REPOSITORY}\`:
+
+          | Image | Tag |
+          |-------|-----|
+          | accelbench-api | ${IMAGE_TAG} |
+          | accelbench-web | ${IMAGE_TAG} |
+          | accelbench-loadgen | ${IMAGE_TAG} |
+          | accelbench-migration | ${IMAGE_TAG} |
+          | accelbench-cache-job | ${IMAGE_TAG} |
+          | accelbench-tools | ${IMAGE_TAG} |
+          | accelbench-inference-perf | ${IMAGE_TAG} |
+
+          ### Pull images
+
+          \`\`\`bash
+          docker pull ${AWS_ECR_REPOSITORY}/accelbench-api:${IMAGE_TAG}
+          docker pull ${AWS_ECR_REPOSITORY}/accelbench-web:${IMAGE_TAG}
+          docker pull ${AWS_ECR_REPOSITORY}/accelbench-loadgen:${IMAGE_TAG}
+          docker pull ${AWS_ECR_REPOSITORY}/accelbench-migration:${IMAGE_TAG}
+          docker pull ${AWS_ECR_REPOSITORY}/accelbench-cache-job:${IMAGE_TAG}
+          docker pull ${AWS_ECR_REPOSITORY}/accelbench-tools:${IMAGE_TAG}
+          docker pull ${AWS_ECR_REPOSITORY}/accelbench-inference-perf:${IMAGE_TAG}
+          \`\`\`
+          EOF
+
+      - name: Create GitHub Release
+        if: startsWith(inputs.version, 'v')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.version }}
+        run: |
+          gh release create "${TAG_NAME}" \
+            --title "${TAG_NAME}" \
+            --notes-file /tmp/release-notes.md \
+            || gh release edit "${TAG_NAME}" --notes-file /tmp/release-notes.md
