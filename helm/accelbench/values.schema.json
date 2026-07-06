@@ -5,7 +5,6 @@
   "additionalProperties": true,
   "properties": {
     "namespace": { "type": "string" },
-    "createNamespace": { "type": "boolean" },
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" },
     "imagePullSecrets": { "type": "array" },

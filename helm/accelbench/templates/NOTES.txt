@@ -56,6 +56,23 @@ Components:
      --set database.host=... --set database.password=...
 {{- end }}
 
+{{- if .Values.database.existingSecret }}
+
+ℹ️  The chart expects a Secret "{{ .Values.database.existingSecret }}" in the
+   "{{ include "accelbench.namespace" . }}" namespace with a
+   "{{ .Values.database.existingSecretKey }}" key containing the full
+   Postgres connection string.
+
+   If deploying with --create-namespace (no Terraform/CLI pre-provisioning),
+   create the secret before or immediately after installing the chart:
+
+     kubectl create secret generic {{ .Values.database.existingSecret }} \
+       -n {{ include "accelbench.namespace" . }} \
+       --from-literal={{ .Values.database.existingSecretKey }}='postgres://user:pass@host:5432/accelbench?sslmode=require'
+
+   Pods will remain in CrashLoopBackOff until this secret exists.
+{{- end }}
+
 Run the smoke test any time with:
 
      helm test {{ .Release.Name }} -n {{ include "accelbench.namespace" . }}

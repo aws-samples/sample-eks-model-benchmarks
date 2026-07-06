@@ -5,12 +5,6 @@
 # independently of the release namespace (kept for backward compatibility).
 namespace: "accelbench"
 
-# -- Create the namespace as part of the release. Off by default because the
-# recommended flow provisions the namespace via Terraform (or `helm install
-# --create-namespace`). Set true for a self-contained install that owns its
-# namespace. Only takes effect when it differs from the release namespace.
-createNamespace: false
-
 # -- Override the generated name of chart objects.
 nameOverride: ""
 fullnameOverride: ""
