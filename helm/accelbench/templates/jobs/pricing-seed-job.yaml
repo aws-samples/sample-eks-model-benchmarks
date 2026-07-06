@@ -3,7 +3,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "accelbench.fullname" . }}-pricing-seed
-  namespace: {{ .Values.namespace }}
+  namespace: {{ include "accelbench.namespace" . }}
   labels:
     {{- include "accelbench.labels" . | nindent 4 }}
   annotations:
@@ -21,10 +21,14 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      securityContext:
+        {{- include "accelbench.podSecurityContext" . | nindent 8 }}
       containers:
         - name: pricing-seed
           image: "{{ include "accelbench.image" (dict "service" "api" "Values" .Values "Chart" .Chart) }}"
           imagePullPolicy: {{ .Values.image.api.pullPolicy }}
+          securityContext:
+            {{- include "accelbench.containerSecurityContext" . | nindent 12 }}
           command: ["/pricingrefresh"]
           env:
             - name: DATABASE_URL

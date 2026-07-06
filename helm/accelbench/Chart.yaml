@@ -1,9 +1,11 @@
 apiVersion: v2
 name: accelbench
-description: EKSBench — LLM inference benchmarking platform for AWS accelerated instances
+description: AccelBench — LLM inference benchmarking platform for AWS accelerated instances
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+# The chart patches karpenter.k8s.aws/v1 CRDs and targets EKS 1.31+.
+kubeVersion: ">=1.31.0-0"
 keywords:
   - benchmarking
   - llm
@@ -11,8 +13,9 @@ keywords:
   - gpu
   - neuron
   - aws
-home: https://github.com/accelbench/accelbench
+home: https://github.com/aws-samples/sample-eks-model-benchmarks
 sources:
-  - https://github.com/accelbench/accelbench
+  - https://github.com/aws-samples/sample-eks-model-benchmarks
 maintainers:
-  - name: EKSBench
+  - name: AccelBench
+    url: https://github.com/aws-samples/sample-eks-model-benchmarks

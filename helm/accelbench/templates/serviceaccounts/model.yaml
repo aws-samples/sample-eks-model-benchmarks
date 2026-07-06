@@ -1,8 +1,14 @@
+{{- if .Values.serviceAccounts.model.create }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: accelbench-model
-  namespace: {{ .Values.namespace }}
+  name: {{ .Values.serviceAccounts.model.name }}
+  namespace: {{ include "accelbench.namespace" . }}
   labels:
     {{- include "accelbench.labels" . | nindent 4 }}
     app.kubernetes.io/component: model
+  {{- with .Values.serviceAccounts.model.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

@@ -1,5 +1,19 @@
 # -- Global settings
-namespace: accelbench
+# Namespace to deploy into. Leave empty to use the release namespace (the
+# namespace passed to `helm install --namespace ...`), which is the idiomatic
+# Helm behaviour. Set explicitly only if you need to pin a namespace
+# independently of the release namespace (kept for backward compatibility).
+namespace: "accelbench"
+
+# -- Create the namespace as part of the release. Off by default because the
+# recommended flow provisions the namespace via Terraform (or `helm install
+# --create-namespace`). Set true for a self-contained install that owns its
+# namespace. Only takes effect when it differs from the release namespace.
+createNamespace: false
+
+# -- Override the generated name of chart objects.
+nameOverride: ""
+fullnameOverride: ""
 
 # -- Container images
 # Defaults point to the public ECR registry with the chart's appVersion as tag.
@@ -15,11 +29,13 @@ image:
   api:
     repository: ""  # Default: <registry>/accelbench-api
     tag: ""         # Default: appVersion
-    pullPolicy: Always
+    # Tags default to the immutable appVersion, so IfNotPresent avoids a
+    # needless registry round-trip (and pull failure mode) on every restart.
+    pullPolicy: IfNotPresent
   web:
     repository: ""  # Default: <registry>/accelbench-web
     tag: ""         # Default: appVersion
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
   tools:
     repository: ""  # Default: <registry>/accelbench-tools
     tag: ""         # Default: appVersion
@@ -50,6 +66,24 @@ image:
 
 imagePullSecrets: []
 
+# -- Pod-level security context applied to all workloads. Overridable.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context applied to all workloads. Overridable.
+# readOnlyRootFilesystem is left off by default because some containers write
+# to the filesystem (nginx cache, tooling); enable per-workload once verified.
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
 # -- API server
 api:
   replicaCount: 2
@@ -63,6 +97,19 @@ api:
       memory: 1Gi
   nodeSelector: {}
   tolerations: []
+  affinity: {}
+  # -- Spread the 2 replicas across nodes. Set to [] to disable.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: accelbench-api
+  # -- PodDisruptionBudget for the API deployment.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
   # -- Service account for API (IRSA)
   serviceAccount:
     create: true
@@ -87,6 +134,58 @@ web:
       memory: 256Mi
   nodeSelector: {}
   tolerations: []
+  affinity: {}
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: accelbench-web
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # -- nginx listens on port 80, so the web pod does NOT force runAsNonRoot
+  # (unlike the strict global default used by the API). These override the
+  # global podSecurityContext / containerSecurityContext for the web pod only.
+  #
+  # The stock nginx:alpine image starts its master process as root, then drops
+  # workers to the `nginx` user via setuid. That handoff needs CHOWN + SETUID +
+  # SETGID (plus NET_BIND_SERVICE to bind port 80). Dropping ALL with only
+  # NET_BIND_SERVICE makes nginx exit immediately — so we drop ALL and add back
+  # exactly the four it needs.
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+      add:
+        - CHOWN
+        - SETGID
+        - SETUID
+        - NET_BIND_SERVICE
+
+# -- Extra service accounts for benchmark workloads (loadgen / model / cache
+# jobs). These run in the accelbench namespace and typically need IRSA / Pod
+# Identity roles for S3 (results, model weights) and Secrets Manager (HF token).
+# Set create=false on a brownfield cluster where they already exist.
+serviceAccounts:
+  loadgen:
+    create: true
+    name: accelbench-loadgen
+    annotations: {}
+    # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/accelbench-loadgen
+  model:
+    create: true
+    name: accelbench-model
+    annotations: {}
+  cacheJob:
+    create: true
+    name: accelbench-cache-job
+    annotations: {}
 
 # -- Public HTTPS ingress (PRD-43a). Disabled by default — port-forward works
 # out of the box. Set enabled=true, host, and tls.source to stand up a public
@@ -106,17 +205,23 @@ ingress:
 
 # -- Database (Aurora PostgreSQL)
 database:
-  # -- Connection string. Typically constructed from Terraform outputs.
-  # Format: postgres://user:password@host:port/dbname?sslmode=require
-  url: ""
-  # -- Alternatively reference an existing Kubernetes secret
-  existingSecret: ""
+  # -- RECOMMENDED: reference an existing Kubernetes secret holding a
+  # pre-encoded DATABASE_URL (this is what Terraform provisions as
+  # `accelbench-db`). Using existingSecret sidesteps all password-encoding
+  # concerns because the URL is built and encoded outside the chart.
+  existingSecret: "accelbench-db"
   existingSecretKey: "DATABASE_URL"
-  # -- Aurora cluster endpoint from Terraform output
+  # -- Full connection string, used VERBATIM when set. You must percent-encode
+  # the password yourself. Format:
+  #   postgres://user:password@host:port/dbname?sslmode=require
+  url: ""
+  # -- Component fields — used only when both existingSecret and url are empty.
+  # The chart assembles the DSN and percent-encodes `password` automatically.
   host: ""
   port: 5432
   name: accelbench
   username: accelbench
+  password: ""
   sslmode: require
 
 # -- Database migration job
@@ -143,9 +248,22 @@ pricingRefresh:
       cpu: 500m
       memory: 512Mi
 
-# -- Catalog seed (on-demand via API, no schedule)
+# -- Catalog refresh CronJob. Nudges the API's /api/v1/catalog/seed endpoint;
+# the seeder itself runs in-process in the API (PRD-30). Runs on a node labeled
+# accelbench/node-type=system.
 catalogSeed:
   enabled: true
+  schedule: "0 2 * * 0"  # Weekly: Sunday at 02:00 UTC
+  image: "curlimages/curl:8.11.0"
+  nodeSelector:
+    accelbench/node-type: system
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
 
 # -- HuggingFace token (optional, for gated model access)
 # PRD-31: Prefer setting this via the Configuration page (/configuration) once

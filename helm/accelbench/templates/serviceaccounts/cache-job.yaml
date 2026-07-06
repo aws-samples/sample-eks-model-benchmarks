@@ -1,8 +1,14 @@
+{{- if .Values.serviceAccounts.cacheJob.create }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: accelbench-cache-job
-  namespace: {{ .Values.namespace }}
+  name: {{ .Values.serviceAccounts.cacheJob.name }}
+  namespace: {{ include "accelbench.namespace" . }}
   labels:
     {{- include "accelbench.labels" . | nindent 4 }}
     app.kubernetes.io/component: cache-job
+  {{- with .Values.serviceAccounts.cacheJob.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

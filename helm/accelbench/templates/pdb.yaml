@@ -1,0 +1,41 @@
+{{- if .Values.api.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "accelbench.fullname" . }}-api
+  namespace: {{ include "accelbench.namespace" . }}
+  labels:
+    {{- include "accelbench.labels" . | nindent 4 }}
+    {{- include "accelbench.api.selectorLabels" . | nindent 4 }}
+spec:
+  {{- if .Values.api.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.api.podDisruptionBudget.minAvailable }}
+  {{- else if .Values.api.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.api.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "accelbench.api.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- if .Values.web.podDisruptionBudget.enabled }}
+{{- if .Values.api.podDisruptionBudget.enabled }}
+---
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "accelbench.fullname" . }}-web
+  namespace: {{ include "accelbench.namespace" . }}
+  labels:
+    {{- include "accelbench.labels" . | nindent 4 }}
+    {{- include "accelbench.web.selectorLabels" . | nindent 4 }}
+spec:
+  {{- if .Values.web.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.web.podDisruptionBudget.minAvailable }}
+  {{- else if .Values.web.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.web.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "accelbench.web.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -4,7 +4,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "accelbench.fullname" . }}
-  namespace: {{ .Values.namespace }}
+  namespace: {{ include "accelbench.namespace" . }}
   labels:
     {{- include "accelbench.labels" . | nindent 4 }}
   annotations:

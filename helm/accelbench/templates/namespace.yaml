@@ -1,6 +1,16 @@
+{{- /*
+Optionally create the namespace as part of the release. Off by default: the
+recommended flow provisions the namespace via Terraform or `helm install
+--create-namespace`. Only rendered when createNamespace=true AND the target
+namespace differs from the release namespace Helm already manages.
+*/ -}}
+{{- if .Values.createNamespace }}
+{{- if ne (include "accelbench.namespace" .) .Release.Namespace }}
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ .Values.namespace }}
+  name: {{ include "accelbench.namespace" . }}
   labels:
     {{- include "accelbench.labels" . | nindent 4 }}
+{{- end }}
+{{- end }}

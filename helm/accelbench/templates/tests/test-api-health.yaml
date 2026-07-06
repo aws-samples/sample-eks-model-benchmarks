@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "accelbench.fullname" . }}-test-api-health
+  namespace: {{ include "accelbench.namespace" . }}
+  labels:
+    {{- include "accelbench.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  securityContext:
+    {{- include "accelbench.podSecurityContext" . | nindent 4 }}
+  containers:
+    - name: curl
+      image: {{ .Values.catalogSeed.image | default "curlimages/curl:8.11.0" | quote }}
+      securityContext:
+        {{- include "accelbench.containerSecurityContext" . | nindent 8 }}
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          echo "Probing API /healthz ..."
+          curl -sf \
+            "http://{{ include "accelbench.fullname" . }}-api.{{ include "accelbench.namespace" . }}.svc.cluster.local:{{ .Values.api.port }}/healthz" \
+            -o /dev/null -w 'API healthz: HTTP %{http_code}\n'
+          echo "Probing web frontend / ..."
+          curl -sf \
+            "http://{{ include "accelbench.fullname" . }}-web.{{ include "accelbench.namespace" . }}.svc.cluster.local:{{ .Values.web.port }}/" \
+            -o /dev/null -w 'Web root: HTTP %{http_code}\n'
+      resources:
+        requests:
+          cpu: 50m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 64Mi

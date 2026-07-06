@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "AccelBench Helm values",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "namespace": { "type": "string" },
+    "createNamespace": { "type": "boolean" },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "imagePullSecrets": { "type": "array" },
+    "image": {
+      "type": "object",
+      "properties": {
+        "registry": { "type": "string" },
+        "tag": { "type": "string" }
+      }
+    },
+    "podSecurityContext": { "type": "object" },
+    "containerSecurityContext": { "type": "object" },
+    "api": {
+      "type": "object",
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "resources": { "type": "object" },
+        "podDisruptionBudget": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minAvailable": { "type": ["integer", "string"] },
+            "maxUnavailable": { "type": ["integer", "string"] }
+          }
+        },
+        "serviceAccount": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" },
+            "name": { "type": "string" },
+            "annotations": { "type": "object" }
+          }
+        }
+      }
+    },
+    "web": {
+      "type": "object",
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "properties": { "create": { "type": "boolean" } }
+    },
+    "serviceAccounts": {
+      "type": "object",
+      "properties": {
+        "loadgen": { "$ref": "#/$defs/serviceAccount" },
+        "model": { "$ref": "#/$defs/serviceAccount" },
+        "cacheJob": { "$ref": "#/$defs/serviceAccount" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "host": { "type": "string" },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "source": { "type": "string", "enum": ["acm-route53", "acm-existing", "none"] },
+            "certificateArn": { "type": "string" }
+          }
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string" },
+        "url": { "type": "string" },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "name": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "sslmode": {
+          "type": "string",
+          "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]
+        }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "pricingRefresh": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "schedule": { "type": "string" },
+        "regions": { "type": "string" }
+      }
+    },
+    "catalogSeed": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "schedule": { "type": "string" },
+        "image": { "type": "string" }
+      }
+    },
+    "huggingface": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string" }
+      }
+    },
+    "results": {
+      "type": "object",
+      "properties": { "s3Bucket": { "type": "string" } }
+    },
+    "models": {
+      "type": "object",
+      "properties": { "s3Bucket": { "type": "string" } }
+    },
+    "cognito": {
+      "type": "object",
+      "properties": {
+        "userPoolId": { "type": "string" },
+        "clientId": { "type": "string" },
+        "authDisabled": { "type": "boolean" }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "properties": {
+        "pullThroughEnabled": { "type": "boolean" },
+        "pullThroughURI": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    }
+  }
+}

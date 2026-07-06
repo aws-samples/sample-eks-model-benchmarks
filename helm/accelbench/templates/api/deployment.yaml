@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "accelbench.fullname" . }}-api
-  namespace: {{ .Values.namespace }}
+  namespace: {{ include "accelbench.namespace" . }}
   labels:
     {{- include "accelbench.labels" . | nindent 4 }}
     {{- include "accelbench.api.selectorLabels" . | nindent 4 }}
@@ -15,16 +15,23 @@ spec:
     metadata:
       labels:
         {{- include "accelbench.api.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll the API pods when the DB secret we render changes on upgrade.
+        checksum/secrets: {{ include (print $.Template.BasePath "/secrets/secrets.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "accelbench.api.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      securityContext:
+        {{- include "accelbench.podSecurityContext" . | nindent 8 }}
       containers:
         - name: api
           image: "{{ include "accelbench.image" (dict "service" "api" "Values" .Values "Chart" .Chart) }}"
           imagePullPolicy: {{ .Values.image.api.pullPolicy }}
+          securityContext:
+            {{- include "accelbench.containerSecurityContext" . | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.api.port }}
@@ -60,7 +67,7 @@ spec:
             {{- end }}
             {{- end }}
             - name: TOOLS_IMAGE
-              value: "{{ .Values.image.tools.repository }}:{{ .Values.image.tools.tag }}"
+              value: "{{ include "accelbench.image" (dict "service" "tools" "Values" .Values "Chart" .Chart) }}"
             {{- if or .Values.huggingface.token .Values.huggingface.existingSecret }}
             - name: HF_SECRET_NAME
               value: "{{ include "accelbench.hfSecretName" . }}"
@@ -75,7 +82,7 @@ spec:
             {{- end }}
             {{- if .Values.image.cacheJob.repository }}
             - name: CACHE_JOB_IMAGE
-              value: "{{ .Values.image.cacheJob.repository }}:{{ .Values.image.cacheJob.tag }}"
+              value: "{{ .Values.image.cacheJob.repository }}:{{ .Values.image.cacheJob.tag | default .Chart.AppVersion }}"
             {{- end }}
             {{- if and .Values.registry .Values.registry.pullThroughEnabled .Values.registry.pullThroughURI }}
             - name: PULL_THROUGH_REGISTRY
@@ -94,6 +101,14 @@ spec:
             - name: COGNITO_CLIENT_ID
               value: "{{ .Values.cognito.clientId }}"
             {{- end }}
+          # Gate liveness until the API has finished booting (DB connect /
+          # migration wait) so a slow start isn't killed mid-flight.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /healthz
@@ -110,6 +125,14 @@ spec:
             {{- toYaml .Values.api.resources | nindent 12 }}
       {{- with .Values.api.nodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.api.tolerations }}

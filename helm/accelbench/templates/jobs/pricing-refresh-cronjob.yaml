@@ -3,7 +3,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: {{ include "accelbench.fullname" . }}-pricing-refresh
-  namespace: {{ .Values.namespace }}
+  namespace: {{ include "accelbench.namespace" . }}
   labels:
     {{- include "accelbench.labels" . | nindent 4 }}
 spec:
@@ -23,10 +23,14 @@ spec:
           imagePullSecrets:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          securityContext:
+            {{- include "accelbench.podSecurityContext" . | nindent 12 }}
           containers:
             - name: pricing-refresh
               image: "{{ include "accelbench.image" (dict "service" "api" "Values" .Values "Chart" .Chart) }}"
               imagePullPolicy: {{ .Values.image.api.pullPolicy }}
+              securityContext:
+                {{- include "accelbench.containerSecurityContext" . | nindent 16 }}
               command: ["/pricingrefresh"]
               env:
                 - name: DATABASE_URL
