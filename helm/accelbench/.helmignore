@@ -1,0 +1,15 @@
+# Patterns to ignore when building Helm packages.
+.DS_Store
+.git/
+.gitignore
+.idea/
+.vscode/
+*.tmproj
+*.bak
+*.swp
+*.orig
+*~
+# CI / local tooling
+.helmignore
+README.md.tmpl
+tests/local/

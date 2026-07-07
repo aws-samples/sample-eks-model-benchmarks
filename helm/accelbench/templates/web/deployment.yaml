@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "accelbench.fullname" . }}-web
-  namespace: {{ .Values.namespace }}
+  namespace: {{ include "accelbench.namespace" . }}
   labels:
     {{- include "accelbench.labels" . | nindent 4 }}
     {{- include "accelbench.web.selectorLabels" . | nindent 4 }}
@@ -15,15 +15,22 @@ spec:
     metadata:
       labels:
         {{- include "accelbench.web.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll the web pods when the nginx config changes on upgrade.
+        checksum/config: {{ include (print $.Template.BasePath "/web/configmap.yaml") . | sha256sum }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      securityContext:
+        {{- toYaml .Values.web.podSecurityContext | nindent 8 }}
       containers:
         - name: nginx
           image: "{{ include "accelbench.image" (dict "service" "web" "Values" .Values "Chart" .Chart) }}"
           imagePullPolicy: {{ .Values.image.web.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.web.containerSecurityContext | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.web.port }}
@@ -52,6 +59,14 @@ spec:
             name: {{ include "accelbench.fullname" . }}-nginx
       {{- with .Values.web.nodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.web.tolerations }}

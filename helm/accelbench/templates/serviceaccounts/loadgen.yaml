@@ -1,0 +1,14 @@
+{{- if .Values.serviceAccounts.loadgen.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccounts.loadgen.name }}
+  namespace: {{ include "accelbench.namespace" . }}
+  labels:
+    {{- include "accelbench.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loadgen
+  {{- with .Values.serviceAccounts.loadgen.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

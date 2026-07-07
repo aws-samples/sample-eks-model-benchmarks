@@ -1,0 +1,78 @@
+AccelBench {{ .Chart.AppVersion }} has been deployed as release "{{ .Release.Name }}"
+in namespace "{{ include "accelbench.namespace" . }}".
+
+Components:
+  - API server        ({{ .Values.api.replicaCount }} replicas)
+  - Web frontend      ({{ .Values.web.replicaCount }} replicas)
+  {{- if .Values.migration.enabled }}
+  - DB migration Job  (pre-install/upgrade hook)
+  {{- end }}
+  {{- if .Values.pricingRefresh.enabled }}
+  - Pricing refresh   (CronJob: {{ .Values.pricingRefresh.schedule }})
+  {{- end }}
+  {{- if .Values.catalogSeed.enabled }}
+  - Catalog refresh   (CronJob: {{ .Values.catalogSeed.schedule }})
+  {{- end }}
+
+1. Check that the pods are running:
+
+     kubectl get pods -n {{ include "accelbench.namespace" . }} \
+       -l app.kubernetes.io/instance={{ .Release.Name }}
+
+2. Access the UI:
+{{- if .Values.ingress.enabled }}
+
+   Ingress is enabled. Once the load balancer is provisioned, the app is
+   reachable at:
+
+     http{{ if ne .Values.ingress.tls.source "none" }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+
+   No ingress is configured (recommended default). Use port-forward:
+
+     kubectl port-forward -n {{ include "accelbench.namespace" . }} svc/{{ include "accelbench.fullname" . }}-web 8080:80
+     # → http://localhost:8080
+{{- end }}
+
+{{- if .Values.cognito.authDisabled }}
+
+⚠️  AUTHENTICATION IS DISABLED (cognito.authDisabled=true).
+   Every request is served as a synthetic admin (dev@local). This is only
+   safe behind port-forward, VPN, or Kubernetes RBAC.
+   NEVER combine authDisabled=true with an internet-facing ingress — doing so
+   exposes the control plane with no access control.
+{{- if and .Values.ingress.enabled (eq .Values.ingress.tls.source "none") }}
+
+   You currently have ingress.enabled=true with tls.source=none AND auth
+   disabled. Review this before exposing the load balancer publicly.
+{{- end }}
+{{- end }}
+
+{{- if and (not .Values.database.existingSecret) (not .Values.database.url) (not .Values.database.password) }}
+
+⚠️  No database credentials were provided. Set one of:
+     --set database.existingSecret=accelbench-db        (recommended)
+     --set database.url=postgres://user:pass@host:5432/accelbench?sslmode=require
+     --set database.host=... --set database.password=...
+{{- end }}
+
+{{- if .Values.database.existingSecret }}
+
+ℹ️  The chart expects a Secret "{{ .Values.database.existingSecret }}" in the
+   "{{ include "accelbench.namespace" . }}" namespace with a
+   "{{ .Values.database.existingSecretKey }}" key containing the full
+   Postgres connection string.
+
+   If deploying with --create-namespace (no Terraform/CLI pre-provisioning),
+   create the secret before or immediately after installing the chart:
+
+     kubectl create secret generic {{ .Values.database.existingSecret }} \
+       -n {{ include "accelbench.namespace" . }} \
+       --from-literal={{ .Values.database.existingSecretKey }}='postgres://user:pass@host:5432/accelbench?sslmode=require'
+
+   Pods will remain in CrashLoopBackOff until this secret exists.
+{{- end }}
+
+Run the smoke test any time with:
+
+     helm test {{ .Release.Name }} -n {{ include "accelbench.namespace" . }}

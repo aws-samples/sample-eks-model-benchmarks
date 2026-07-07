@@ -165,9 +165,7 @@ helm install accelbench oci://public.ecr.aws/aws-containers/accelbench \
   --namespace accelbench \
   --set database.existingSecret=accelbench-db \
   --set results.s3Bucket=accelbench-results-${ACCOUNT_ID} \
-  --set models.s3Bucket=accelbench-models-${ACCOUNT_ID} \
-  --set registry.pullThroughEnabled=true \
-  --set registry.pullThroughURI=$REGISTRY
+  --set models.s3Bucket=accelbench-models-${ACCOUNT_ID}
 ```
 
 **Option B: Use self-built images (development / air-gapped)**
@@ -181,12 +179,12 @@ helm install accelbench helm/accelbench \
   --set image.tag=latest \
   --set database.existingSecret=accelbench-db \
   --set results.s3Bucket=accelbench-results-${ACCOUNT_ID} \
-  --set models.s3Bucket=accelbench-models-${ACCOUNT_ID} \
-  --set registry.pullThroughEnabled=true \
-  --set registry.pullThroughURI=$REGISTRY
+  --set models.s3Bucket=accelbench-models-${ACCOUNT_ID}
 ```
 
 > **Image resolution:** The chart defaults to `public.ecr.aws/aws-containers/accelbench-<service>:<appVersion>`. Override `image.registry` to swap the base registry for all images, `image.tag` to change the global tag, or `image.<service>.repository`/`image.<service>.tag` for per-service control.
+
+> **Pull-through cache (optional):** To route vLLM image pulls through ECR instead of Docker Hub directly, first configure Docker Hub credentials (via `terraform.tfvars` or Configuration → Credentials in the UI), then upgrade with `--set registry.pullThroughEnabled=true --set registry.pullThroughURI=$REGISTRY`. Without credentials, benchmark pods will fail with `ImagePullBackOff (403 Forbidden)`.
 
 The chart deploys:
 

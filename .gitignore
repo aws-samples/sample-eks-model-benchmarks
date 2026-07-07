@@ -53,3 +53,4 @@ PRD*.md
 # Claude Code project guide (personal)
 CLAUDE.md
 __pycache__/
+.claude/

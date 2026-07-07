@@ -1,0 +1,55 @@
+{{- if .Values.catalogSeed.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "accelbench.fullname" . }}-catalog-refresh
+  namespace: {{ include "accelbench.namespace" . }}
+  labels:
+    {{- include "accelbench.labels" . | nindent 4 }}
+    app.kubernetes.io/component: catalog-refresh
+spec:
+  schedule: {{ .Values.catalogSeed.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            {{- include "accelbench.labels" . | nindent 12 }}
+            app.kubernetes.io/component: catalog-refresh
+        spec:
+          restartPolicy: Never
+          securityContext:
+            {{- include "accelbench.podSecurityContext" . | nindent 12 }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.catalogSeed.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: trigger
+              image: {{ .Values.catalogSeed.image | quote }}
+              securityContext:
+                {{- include "accelbench.containerSecurityContext" . | nindent 16 }}
+              # PRD-30: the seeder is now an in-process goroutine inside the
+              # API server. This CronJob just nudges the endpoint; the API
+              # reads the matrix from the DB and uses the platform HF token
+              # (PRD-31) for gated models.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  curl -sfX POST \
+                    "http://{{ include "accelbench.fullname" . }}-api.{{ include "accelbench.namespace" . }}.svc.cluster.local:{{ .Values.api.port }}/api/v1/catalog/seed" \
+                    -o /dev/null -w 'HTTP %{http_code}\n'
+              resources:
+                {{- toYaml .Values.catalogSeed.resources | nindent 16 }}
+{{- end }}
