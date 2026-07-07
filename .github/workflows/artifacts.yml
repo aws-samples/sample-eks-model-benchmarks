@@ -114,6 +114,12 @@ jobs:
         run: |
           helm push /tmp/helm-packages/accelbench-*.tgz oci://${AWS_ECR_REPOSITORY}
 
+      - name: Upload chart as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: /tmp/helm-packages/accelbench-*.tgz
+
   release:
     name: Create GitHub Release
     needs: [build, helm]
@@ -122,14 +128,35 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Generate release notes
+      - name: Download Helm chart artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: /tmp/helm-packages
+
+      - name: Attach Helm chart to release
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.version }}
+        run: |
+          gh release upload "${TAG_NAME}" /tmp/helm-packages/accelbench-*.tgz --clobber
+
+      - name: Append artifact details to release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.version }}
           AWS_ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
         run: |
           IMAGE_TAG="${TAG_NAME#v}"
 
-          cat > /tmp/release-notes.md << EOF
+          # Fetch existing release notes (hand-written at release creation time)
+          EXISTING=$(gh release view "${TAG_NAME}" --json body -q .body 2>/dev/null || echo "")
+
+          # Build the artifact table to append
+          cat > /tmp/artifact-notes.md << EOF
+
+          ---
+
           ## Container Images
 
           All images published to \`${AWS_ECR_REPOSITORY}\`:
@@ -164,14 +191,7 @@ jobs:
           Override with \`--set image.registry=<your-registry>\` or per-service \`--set image.api.repository=...\`.
           EOF
 
-      - name: Upload release assets
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ inputs.version }}
-        run: |
-          gh release edit "${TAG_NAME}" \
-            --notes-file /tmp/release-notes.md \
-            2>/dev/null || \
-          gh release create "${TAG_NAME}" \
-            --title "${TAG_NAME}" \
-            --notes-file /tmp/release-notes.md
+          # Combine existing notes with artifact details
+          { echo "${EXISTING}"; cat /tmp/artifact-notes.md; } > /tmp/release-notes.md
+
+          gh release edit "${TAG_NAME}" --notes-file /tmp/release-notes.md
