@@ -2,8 +2,10 @@ apiVersion: v2
 name: accelbench
 description: EKSBench — LLM inference benchmarking platform for AWS accelerated instances
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+# version and appVersion are overridden at release time by the CI pipeline
+# (helm package --version/--app-version derived from the git tag).
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"
 # The chart patches karpenter.k8s.aws/v1 CRDs and targets EKS 1.31+.
 kubeVersion: ">=1.31.0-0"
 keywords:
